@@ -177,6 +177,7 @@ Respond ONLY in this exact JSON format, no markdown, no extra text:
         return None
 
 
+def get_price(info, hist):
     for f in ["currentPrice","regularMarketPrice","previousClose","ask","bid"]:
         v = info.get(f)
         if v:
