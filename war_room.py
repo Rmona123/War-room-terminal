@@ -11,6 +11,8 @@ import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import warnings
+import requests
+import json
 from datetime import datetime
 
 warnings.filterwarnings("ignore")
@@ -120,7 +122,61 @@ def fetch_data(ticker):
     except Exception: pass
     return info, hist, fin, bal, cf, news
 
-def get_price(info, hist):
+@st.cache_data(ttl=600, show_spinner=False)
+def ai_analyze_7_powers(ticker, company_name, sector, industry, description,
+                         gross_margin, op_margin, rev_cagr, market_cap, stage):
+    """Call Claude API to automatically analyze which of Helmer's 7 Powers apply."""
+    try:
+        prompt = f"""You are an expert equity analyst trained in Hamilton Helmer's 7 Powers framework.
+
+Analyze this company and determine which of the 7 Powers apply. Be specific, concise, and honest — if a power does NOT apply, say so clearly.
+
+COMPANY: {company_name} ({ticker})
+SECTOR: {sector}
+INDUSTRY: {industry}
+STAGE: {stage}
+GROSS MARGIN: {gross_margin}
+OPERATING MARGIN: {op_margin}
+REVENUE CAGR: {rev_cagr}
+MARKET CAP: {market_cap}
+BUSINESS DESCRIPTION: {description[:600] if description else 'N/A'}
+
+For each of the 7 Powers below, provide:
+1. VERDICT: "YES - confirmed" / "PARTIAL - weak/emerging" / "NO - does not apply"
+2. REASONING: 1-2 sentences max explaining why
+
+Respond ONLY in this exact JSON format, no markdown, no extra text:
+{{
+  "Scale Economies": {{"verdict": "YES/PARTIAL/NO", "reasoning": "..."}},
+  "Network Economies": {{"verdict": "YES/PARTIAL/NO", "reasoning": "..."}},
+  "Counter-Positioning": {{"verdict": "YES/PARTIAL/NO", "reasoning": "..."}},
+  "Switching Costs": {{"verdict": "YES/PARTIAL/NO", "reasoning": "..."}},
+  "Branding": {{"verdict": "YES/PARTIAL/NO", "reasoning": "..."}},
+  "Cornered Resource": {{"verdict": "YES/PARTIAL/NO", "reasoning": "..."}},
+  "Process Power": {{"verdict": "YES/PARTIAL/NO", "reasoning": "..."}}
+}}"""
+
+        response = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={"Content-Type": "application/json"},
+            json={
+                "model": "claude-sonnet-4-20250514",
+                "max_tokens": 1000,
+                "messages": [{"role": "user", "content": prompt}]
+            },
+            timeout=30
+        )
+        data = response.json()
+        raw = ""
+        for block in data.get("content", []):
+            if block.get("type") == "text":
+                raw += block.get("text", "")
+        raw = raw.strip().replace("```json","").replace("```","").strip()
+        return json.loads(raw)
+    except Exception:
+        return None
+
+
     for f in ["currentPrice","regularMarketPrice","previousClose","ask","bid"]:
         v = info.get(f)
         if v:
@@ -712,33 +768,91 @@ def main():
 
     st.markdown("---")
 
-    # ── ROW 3: 7 Powers Framework Display ────────────────────────────────────
-    st.markdown('<div class="section-header">⚡ 7 Powers Analysis — Helmer Framework (Score: 0/29 — fill in below to score)</div>', unsafe_allow_html=True)
-    st.markdown(f'<div style="font-size:0.8rem;color:#64748b;margin-bottom:12px;">Use this section as your qualitative research checklist for <b style="color:#e2e8f0;">{name}</b>. For each power that applies, the scoring is built into the 100-pt model above. A company with no powers scores 0/29 here — that is valid and informative.</div>', unsafe_allow_html=True)
+    # ── ROW 3: AI-Powered 7 Powers Analysis ──────────────────────────────────
+    st.markdown('<div class="section-header">⚡ 7 Powers Analysis — Auto-Analyzed by AI (Helmer Framework)</div>', unsafe_allow_html=True)
 
+    with st.spinner("🤖 Analyzing 7 Powers with AI..."):
+        powers_ai = ai_analyze_7_powers(
+            ticker       = ticker,
+            company_name = name,
+            sector       = sector,
+            industry     = industry,
+            description  = sg(info, "longBusinessSummary", ""),
+            gross_margin = pct(sg(info,"grossMargins",np.nan)),
+            op_margin    = pct(sg(info,"operatingMargins",np.nan)),
+            rev_cagr     = pct(det.get("rc", np.nan)),
+            market_cap   = fmt(sg(info,"marketCap",np.nan), pre="$"),
+            stage        = det.get("stage","mature")
+        )
+
+    # Determine confirmed powers from AI verdict
+    if powers_ai:
+        ai_confirmed = [p for p, v in powers_ai.items() if v.get("verdict","NO").startswith("YES")]
+        ai_partial   = [p for p, v in powers_ai.items() if v.get("verdict","NO").startswith("PARTIAL")]
+        # Score: YES = full weight, PARTIAL = half weight
+        ai_pw_score  = min(29, (len(ai_confirmed) + len(ai_partial)*0.5) * (29/7))
+    else:
+        ai_confirmed = []; ai_partial = []; ai_pw_score = res["pw"]
+
+    # Update the score display with AI result
     cp, pp = st.columns([1, 2])
 
     with cp:
-        st.plotly_chart(radar_chart(confirmed), use_container_width=True, config={"displayModeBar":False})
-        st.markdown(f'<div class="metric-card" style="text-align:center;"><div class="metric-label">Powers Score</div><div class="metric-value" style="color:#3b82f6;font-size:2rem;">{res["pw"]:.1f} / 29</div><div class="metric-sub">Based on analyst notes below</div></div>', unsafe_allow_html=True)
+        st.plotly_chart(radar_chart(ai_confirmed), use_container_width=True, config={"displayModeBar":False})
+        confirmed_count = len(ai_confirmed)
+        partial_count   = len(ai_partial)
+        st.markdown(f"""
+        <div class="metric-card" style="text-align:center;">
+            <div class="metric-label">AI Powers Score</div>
+            <div class="metric-value" style="color:#3b82f6;font-size:2rem;">{ai_pw_score:.1f} / 29</div>
+            <div class="metric-sub">✅ {confirmed_count} confirmed &nbsp;·&nbsp; ⚡ {partial_count} partial</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        if powers_ai:
+            st.markdown("")
+            verdict_summary = []
+            for p in ALL_POWERS:
+                v = powers_ai.get(p, {}).get("verdict","NO")
+                icon = "✅" if v.startswith("YES") else "⚡" if v.startswith("PARTIAL") else "❌"
+                verdict_summary.append(f"{icon} {p}")
+            st.markdown('<div style="font-size:0.78rem;line-height:1.9;color:#94a3b8;">' + "<br>".join(verdict_summary) + '</div>', unsafe_allow_html=True)
+        else:
+            st.markdown(ic("⚠️ AI analysis unavailable. Check API connection.", "#f59e0b"), unsafe_allow_html=True)
 
     with pp:
-        st.markdown('<div style="font-size:0.75rem;color:#64748b;margin-bottom:8px;">For each power, write your analysis in the box. Min 1 sentence to count toward the score. Leave blank if not applicable — score stays 0 for that power.</div>', unsafe_allow_html=True)
-        new_powers = {}
-        for p in ALL_POWERS:
-            prev_txt = st.session_state.get(f"live_pw_{p}", "")
-            with st.expander(f"{'✅' if p in confirmed else '⬜'} {p}", expanded=False):
-                st.markdown(f'<div style="font-size:0.71rem;color:#64748b;font-style:italic;margin-bottom:6px;">{POWER_GUIDE[p]}</div>', unsafe_allow_html=True)
-                txt = st.text_area("", value=prev_txt,
-                                   placeholder="Write your analysis here, or leave blank if this power does not apply...",
-                                   height=70, key=f"live_pw_{p}", label_visibility="collapsed")
-                new_powers[p] = txt
+        if powers_ai:
+            for p in ALL_POWERS:
+                pdata   = powers_ai.get(p, {})
+                verdict = pdata.get("verdict", "NO")
+                reason  = pdata.get("reasoning", "No analysis available.")
+                if verdict.startswith("YES"):
+                    border = "#10b981"; icon = "✅"; badge = "CONFIRMED"
+                    badge_color = "#10b981"; card_bg = "#0a1a0f"
+                elif verdict.startswith("PARTIAL"):
+                    border = "#f59e0b"; icon = "⚡"; badge = "PARTIAL"
+                    badge_color = "#f59e0b"; card_bg = "#1a1505"
+                else:
+                    border = "#1e2a45"; icon = "❌"; badge = "NOT APPLICABLE"
+                    badge_color = "#475569"; card_bg = "#0f1525"
 
-        # Recalculate powers score live if anything was written
-        live_confirmed = [p for p, t in new_powers.items() if t and len(t.strip()) > 10]
-        if live_confirmed != confirmed:
-            live_pw_s = min(29, len(live_confirmed) * (29/7))
-            st.markdown(f'<div class="insight-card" style="border-left-color:#10b981;margin-top:8px;"><div class="insight-text">✅ <b>{len(live_confirmed)} power(s) justified</b> → Powers score updates to <b>{live_pw_s:.1f}/29</b>. Re-run analysis to apply to total score.</div></div>', unsafe_allow_html=True)
+                st.markdown(f"""
+                <div style="background:{card_bg};border:1px solid {border};border-radius:8px;padding:12px 14px;margin:5px 0;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+                        <div style="font-size:0.85rem;font-weight:600;color:#e2e8f0;">{icon} {p}</div>
+                        <div style="font-size:0.68rem;font-weight:700;color:{badge_color};background:rgba(0,0,0,0.3);padding:2px 8px;border-radius:10px;">{badge}</div>
+                    </div>
+                    <div style="font-size:0.8rem;color:#94a3b8;line-height:1.5;">{reason}</div>
+                </div>
+                """, unsafe_allow_html=True)
+        else:
+            for p in ALL_POWERS:
+                st.markdown(f"""
+                <div class="power-card">
+                    <div class="power-name">⬜ {p}</div>
+                    <div class="power-verdict"><em style="color:#475569">{POWER_GUIDE[p]}</em></div>
+                </div>
+                """, unsafe_allow_html=True)
 
     st.markdown("---")
 
@@ -895,7 +1009,7 @@ def main():
         if not np.isnan(det.get("fy",np.nan)) and det["fy"]>0.044: bull.append(f"FCF Yield {pct(det['fy'])} beats 4.4% Treasury")
         if res["sc"].get("st2",0)>=6: bull.append("Stage 2 Uptrend: Price > 50D SMA > 200D SMA")
         if not np.isnan(det.get("rsi",np.nan)) and 45<=det["rsi"]<=65: bull.append(f"RSI {det['rsi']:.1f} in optimal 45–65 zone")
-        if confirmed: bull.append(f"{len(confirmed)} Helmer Power(s) confirmed: {', '.join(confirmed[:3])}{'…' if len(confirmed)>3 else ''}")
+        if ai_confirmed: bull.append(f"{len(ai_confirmed)} Helmer Power(s) confirmed by AI: {', '.join(ai_confirmed[:3])}{'…' if len(ai_confirmed)>3 else ''}")
         if not np.isnan(sg(info,"targetMeanPrice",np.nan)) and not np.isnan(price) and price>0:
             up=(sg(info,"targetMeanPrice",np.nan)/price-1)*100
             if up>15: bull.append(f"Analyst consensus implies {up:.1f}% upside")
@@ -943,7 +1057,7 @@ def main():
             if not np.isnan(ps_v) and not np.isnan(rev_g) and ps_v>20 and rev_g<0.20:
                 bear.append(f"High P/S {ps_v:.1f}x with only {pct(rev_g)} revenue growth — valuation requires acceleration")
         if res["total"]<50: bear.append(f"Score {res['total']}/100 below 50 — AVOID threshold")
-        if not confirmed: bear.append("No Helmer Powers confirmed — moat not established")
+        if not ai_confirmed: bear.append("No Helmer Powers confirmed by AI — moat not established")
         if not bear: bear.append("No critical bear flags at current levels.")
         for pt in bear: st.markdown(ic(f"⚠️ {pt}","#ef4444"), unsafe_allow_html=True)
 
@@ -957,7 +1071,7 @@ def main():
         ("Signal",        signal,                     sig_color),
         ("Score / 100",   str(res["total"]),          sig_color),
         ("Risk Level",    rl,                         "#34d399" if rl=="LOW" else "#fbbf24" if rl=="MEDIUM" else "#f87171"),
-        ("Powers",        f"{len(confirmed)}/7",      "#3b82f6"),
+        ("AI Powers",     f"{len(ai_confirmed)}/7 confirmed", "#3b82f6"),
         ("Analyst Target",f"${target_p:.2f}" if not np.isnan(target_p) else "N/A","#94a3b8"),
     ]):
         with col:
