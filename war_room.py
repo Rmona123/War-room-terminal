@@ -559,13 +559,14 @@ def risk_lvl(det):
 ALL_POWERS = ["Scale Economies","Network Economies","Counter-Positioning",
               "Switching Costs","Branding","Cornered Resource","Process Power"]
 
-def analyze_7_powers(info, fin, cf, ticker, sector, industry, stage):
+def analyze_7_powers(info, fin, cf, ticker, sector, industry, stage, det=None):
     """
     Rule-based 7 Powers analysis using Helmer's framework.
     Based on financial data, sector, margins, and business characteristics.
     Returns dict with verdict + reasoning for each power.
     """
     results = {}
+    if det is None: det = {}
     sector   = (sector or "").lower()
     industry = (industry or "").lower()
     desc     = (sg(info,"longBusinessSummary","") or "").lower()
@@ -650,79 +651,141 @@ def analyze_7_powers(info, fin, cf, ticker, sector, industry, stage):
 
     # ── 4. SWITCHING COSTS ───────────────────────────────────────────────────
     # Evidence: enterprise software, ERP, financial data, deep integrations
+    # Nuance: NRR > 110% signals customers are expanding despite ability to leave
+    nrr = np.nan  # yfinance doesn't provide NRR directly, but we proxy it
+    # Proxy: if revenue growth is strong AND it's SaaS/software, NRR is likely high
+    # Best available signal: net income retention proxy via revenue growth in software
+    nrr_proxy_high = is_software and rg > 0.15 and gm > 0.65
+    nrr_proxy_mid  = is_software and rg > 0.08 and gm > 0.55
+
     if is_software and is_large and gm > 0.65:
         v = "YES"
-        r = f"Enterprise software with {gm*100:.0f}% gross margins — deep workflow integrations, data migration complexity, and retraining costs make switching prohibitively expensive for customers."
+        r = f"Enterprise software with {gm*100:.0f}% gross margins — deep workflow integrations, data migration complexity, and retraining costs make switching prohibitively expensive. Revenue growth of {rg*100:.0f}% suggests NRR likely >110%, meaning customers expand spend rather than leave."
+    elif nrr_proxy_high:
+        v = "YES"
+        r = f"High-margin software ({gm*100:.0f}% GM) growing at {rg*100:.0f}% — strong proxy for NRR >110%, where customers are not just staying but buying more, which is the clearest evidence of switching cost lock-in."
     elif is_finance and any(x in desc for x in ["terminal","data","analytics","workflow"]):
         v = "YES"
-        r = "Financial data/analytics platforms embed deeply into daily workflows — years of custom screens, historical data, and muscle memory create switching costs that far exceed subscription cost."
-    elif is_software and gm > 0.55:
+        r = "Financial data/analytics platforms embed deeply into daily workflows — years of custom screens, historical data, and muscle memory create switching costs that far exceed subscription cost. Bloomberg-type lock-in."
+    elif nrr_proxy_mid or (is_software and gm > 0.55):
         v = "PARTIAL"
-        r = f"Software business with strong margins ({gm*100:.0f}%) suggests some stickiness, but switching costs appear moderate rather than prohibitive."
+        r = f"Software business with {gm*100:.0f}% GM and {rg*100:.0f}% growth suggests moderate switching costs. NRR likely above 100% but whether it clears the 110% threshold that signals true lock-in is unclear."
     elif is_finance or any(x in desc for x in ["enterprise","erp","crm","workflow"]):
         v = "PARTIAL"
-        r = "B2B/enterprise focus implies some switching friction, but the depth of integration and true lock-in is unclear from available data."
+        r = "B2B/enterprise focus implies switching friction, but depth of integration and true lock-in strength is unclear from available data."
     else:
         v = "NO"
-        r = "Consumer or commodity business where switching to a competitor involves minimal cost, effort, or risk."
+        r = "Consumer or commodity business where switching involves minimal cost. No evidence of NRR dynamics that would indicate customers are trapped."
     results["Switching Costs"] = {"verdict": v, "reasoning": r}
 
     # ── 5. BRANDING ──────────────────────────────────────────────────────────
     # Evidence: consumer premium brand, luxury, high gross margins in consumer sector
+    # Nuance: established brands spend LESS on advertising relative to revenue
+    # Low ad spend + high margins = brand does the selling, not the marketing budget
+    sga     = safe_float(sg(info,"sellingGeneralAdministrative", np.nan))
+    if np.isnan(sga): sga = sr(fin, "Selling General And Administration") or 0
+    sga_pct = sga / rev if rev > 0 and sga > 0 else np.nan
+    # Low SGA% + high GM = brand power (brand sells itself)
+    low_ad_high_margin = not np.isnan(sga_pct) and sga_pct < 0.15 and gm > 0.50
+
     if is_luxury and gm > 0.60:
         v = "YES"
-        r = f"Luxury brand with {gm*100:.0f}% gross margins — pricing power is clearly derived from brand perception rather than material cost, with customers paying large premiums over functionally equivalent alternatives."
+        ad_note = f" Low advertising spend ({sga_pct*100:.0f}% of revenue) confirms the brand sells itself — like Ferrari, which spends almost nothing on traditional ads." if not np.isnan(sga_pct) else ""
+        r = f"Luxury brand with {gm*100:.0f}% gross margins — pricing power derived entirely from brand perception, not material cost.{ad_note}"
+    elif is_consumer and gm > 0.40 and is_large and low_ad_high_margin:
+        v = "YES"
+        r = f"Strong consumer brand: {gm*100:.0f}% gross margins with only {sga_pct*100:.0f}% SG&A/revenue ratio. Low relative ad spend + high margins = brand has become self-reinforcing — customers seek it out rather than being advertised to."
     elif is_consumer and gm > 0.40 and is_large:
         v = "YES"
-        r = f"Strong consumer brand at scale: {gm*100:.0f}% gross margins in a consumer category suggest customers pay a meaningful premium specifically for the brand, not just the product."
+        r = f"Strong consumer brand at scale with {gm*100:.0f}% gross margins — customers pay a premium for the brand specifically, not just the product."
     elif is_consumer and gm > 0.30:
         v = "PARTIAL"
-        r = f"Some brand premium visible in margins ({gm*100:.0f}%), but pricing power may be partially attributable to other factors like distribution or scale."
+        r = f"Some brand premium in margins ({gm*100:.0f}% GM), but pricing power may be partially attributable to scale or distribution rather than pure brand equity."
+    elif low_ad_high_margin and not is_software:
+        v = "PARTIAL"
+        r = f"Interesting signal: low SG&A ({sga_pct*100:.0f}% of revenue) with {gm*100:.0f}% gross margins suggests the company may not need heavy advertising — a hallmark of an established brand. Worth investigating further."
     elif any(x in desc for x in ["brand","consumer","lifestyle","design"]) and gm > 0.35:
         v = "PARTIAL"
-        r = "Brand language in company description and above-average margins suggest emerging brand value, but premium pricing power is not yet clearly dominant."
+        r = "Brand language in company description and above-average margins suggest emerging brand value, but premium pricing power not yet clearly dominant."
     else:
         v = "NO"
-        r = "B2B or commodity-adjacent business where purchasing decisions are driven by specs and price rather than brand affinity."
+        r = "B2B or commodity-adjacent business where purchasing decisions are driven by specs and price. No evidence of meaningful brand premium."
     results["Branding"] = {"verdict": v, "reasoning": r}
 
     # ── 6. CORNERED RESOURCE ─────────────────────────────────────────────────
     # Evidence: high R&D, patents, proprietary data, regulatory licenses
+    # Nuance: human capital counts — world-leading researchers, star teams, unique talent
+    # Proxy for talent cornering: very high revenue-per-employee + high R&D in tech/AI
+    rev_per_emp  = rev / emp if emp > 0 else 0
+    talent_signal = rev_per_emp > 500000 and rd_pct > 0.10  # >$500K/employee + heavy R&D
+    ai_signal     = any(x in desc for x in ["artificial intelligence","machine learning","ai research","large language","foundation model","deep learning"])
+
     if is_pharma and rd_pct > 0.15:
         v = "YES"
-        r = f"Pharma/biotech with {rd_pct*100:.0f}% R&D intensity — patent portfolio and FDA-approved compounds represent legally protected cornered resources with time-limited but strong exclusivity."
+        r = f"Pharma/biotech with {rd_pct*100:.0f}% R&D intensity — patent portfolio and approved compounds are legally protected cornered resources. Pipeline = future cornered resources being built."
     elif is_semis and rd_pct > 0.10:
         v = "YES"
-        r = f"Semiconductor IP with {rd_pct*100:.0f}% R&D spend — proprietary chip architectures, process nodes, and design tools represent cornered resources that take decades to replicate."
+        r = f"Semiconductor IP with {rd_pct*100:.0f}% R&D spend — proprietary chip architectures and design tools take decades to replicate. Key engineers are also a cornered talent resource."
+    elif ai_signal and rd_pct > 0.10:
+        v = "YES"
+        r = f"AI/ML research leadership with {rd_pct*100:.0f}% R&D intensity — the world's top AI researchers are a scarce human capital resource. Proprietary training data compounds this. Both are classic cornered resources."
+    elif talent_signal:
+        v = "YES"
+        r = f"Revenue per employee of ${rev_per_emp/1000:.0f}K with {rd_pct*100:.0f}% R&D intensity signals a concentration of high-value talent — a human capital cornered resource that competitors cannot simply hire away en masse."
     elif rd_pct > 0.12 and gm > 0.60:
         v = "YES"
-        r = f"High R&D intensity ({rd_pct*100:.0f}% of revenue) combined with strong margins suggests proprietary technology or data assets that competitors cannot easily acquire or build."
+        r = f"High R&D intensity ({rd_pct*100:.0f}% of revenue) with strong margins — suggests proprietary technology or data assets that competitors cannot easily acquire."
     elif rd_pct > 0.06 or any(x in desc for x in ["patent","proprietary","exclusive","license","spectrum"]):
         v = "PARTIAL"
-        r = f"Some evidence of proprietary assets (R&D at {rd_pct*100:.1f}% of revenue), but exclusivity depth and remaining economic life are unclear."
+        r = f"Some proprietary assets (R&D at {rd_pct*100:.1f}% of revenue), but exclusivity depth is unclear. Patents expire, talent moves — assess remaining economic life carefully."
     else:
         v = "NO"
-        r = "No clear evidence of exclusive access to a scarce asset — technology, talent, or resources appear replicable by well-funded competitors."
+        r = "No clear evidence of exclusive access to scarce assets — technology, talent, or data appear replicable by well-funded competitors."
     results["Cornered Resource"] = {"verdict": v, "reasoning": r}
 
     # ── 7. PROCESS POWER ─────────────────────────────────────────────────────
     # Evidence: persistent outperformance, manufacturing excellence, operational culture
-    fcf_margin = fcf / rev if rev > 0 else 0
-    if om > 0.30 and gm > 0.50 and is_large:
+    # Nuance: the KEY signal is HIGHER MARGINS THAN DIRECT COMPETITORS with the SAME model
+    # We proxy this by: unusually high margins for the sector + sustained over time (OM trend)
+    om_trend_list = det.get("om_trend", []) if hasattr(det, "get") else []
+    # Check if operating margins have been consistently high (stable/improving trend)
+    om_stable = len(om_trend_list) >= 3 and all(x > 0.15 for x in om_trend_list[:3])
+    om_improving = len(om_trend_list) >= 2 and om_trend_list[0] > om_trend_list[-1]
+
+    # Sector-adjusted margin benchmarks — same model, higher margins = process power
+    sector_om_benchmark = {
+        "technology": 0.20, "software": 0.20, "semiconductor": 0.20,
+        "consumer": 0.12, "retail": 0.08, "industrial": 0.12,
+        "financial": 0.20, "healthcare": 0.15, "energy": 0.10,
+    }
+    benchmark = 0.15  # default
+    for k, v_bm in sector_om_benchmark.items():
+        if k in sector or k in industry:
+            benchmark = v_bm
+            break
+    significantly_above_benchmark = om > benchmark * 1.5  # 50% above sector norm
+
+    if om > 0.30 and gm > 0.50 and is_large and (om_stable or significantly_above_benchmark):
         v = "YES"
-        r = f"Sustained {om*100:.0f}% operating margins at scale are difficult to explain by other factors alone — suggests deeply embedded operational efficiency that competitors have not been able to replicate."
-    elif any(x in desc for x in ["lean","kaizen","six sigma","operational excellence","danaher","manufacturing"]) and om > 0.15:
+        r = f"Operating margin of {om*100:.0f}% is well above what scale or switching costs alone can explain for this sector (benchmark ~{benchmark*100:.0f}%). Sustained margin superiority over peers with the same business model is the defining signal of Process Power."
+    elif any(x in desc for x in ["lean","kaizen","six sigma","operational excellence","danaher","manufacturing system"]) and om > 0.15:
         v = "YES"
-        r = "Explicit operational excellence culture referenced in business description — embedded process systems that drive consistent outperformance are a hallmark of process power."
+        r = f"Explicit operational excellence culture referenced in business description. Named process systems (lean, kaizen, etc.) that drive consistent outperformance are the hallmark of Process Power — like Toyota's TPS or Danaher's DBS."
+    elif significantly_above_benchmark and om > 0.20 and om_stable:
+        v = "YES"
+        r = f"Operating margin {om*100:.0f}% is approximately {om/benchmark:.1f}x the sector benchmark — consistently higher margins than direct competitors with the same model is the clearest evidence of embedded Process Power."
     elif om > 0.20 and fcf_margin > 0.15:
         v = "PARTIAL"
-        r = f"Above-average operating margins ({om*100:.0f}%) and strong FCF conversion suggest operational discipline, but whether this constitutes truly embedded process power vs. scale or switching costs is unclear."
-    elif om > 0.12:
+        r = f"Above-average operating margin ({om*100:.0f}%) and strong FCF conversion suggest operational discipline. To confirm Process Power, verify this margin is higher than direct competitors — same industry, same scale."
+    elif significantly_above_benchmark:
         v = "PARTIAL"
-        r = f"Decent operating margin ({om*100:.0f}%) hints at operational efficiency, but consistent long-term outperformance data needed to confirm genuine process power."
+        r = f"Margins appear above sector norms, which is a promising signal. Process Power requires consistently outperforming direct competitors over multiple cycles — check if this pattern holds in downturns."
+    elif om > 0.12:
+        v = "NO"
+        r = f"Decent operating margin ({om*100:.0f}%) but not clearly superior to sector peers. Process Power requires persistent, unexplained outperformance vs. direct competitors — not just above-average profitability."
     else:
         v = "NO"
-        r = "Operating margins do not suggest embedded process superiority over peers — no evidence of a proprietary operational system driving persistent outperformance."
+        r = "Operating margins do not suggest embedded process superiority. No evidence of a proprietary operational system driving persistent outperformance vs. direct competitors."
     results["Process Power"] = {"verdict": v, "reasoning": r}
 
     return results
@@ -971,7 +1034,7 @@ with tab_research:
         stage    = det.get("stage","mature")
 
         # Rule-based 7 Powers (instant, no API needed)
-        powers_ai = analyze_7_powers(info, fin, cf, ticker, sector, industry, stage)
+        powers_ai = analyze_7_powers(info, fin, cf, ticker, sector, industry, stage, det)
 
         if powers_ai:
             ai_confirmed = [p for p,v in powers_ai.items() if v.get("verdict","NO").upper().startswith("YES")]
