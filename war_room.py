@@ -163,7 +163,7 @@ Respond ONLY in this exact JSON format, no markdown, no extra text:
             response = requests.post(
                 "https://api.groq.com/openai/v1/chat/completions",
                 headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
-                json={"model": "llama-3.3-70b-versatile", "max_tokens": 1000, "temperature": 0.3,
+                json={"model": "llama3-70b-8192", "max_tokens": 1000, "temperature": 0.3,
                       "messages": [{"role": "user", "content": prompt}]},
                 timeout=30
             )
@@ -183,92 +183,7 @@ Respond ONLY in this exact JSON format, no markdown, no extra text:
     return None
 
 
-def ai_news_sentiment(ticker, company_name, news_items):
-    """Use Groq to analyze sentiment of latest news headlines."""
-    try:
-        api_key = st.secrets.get("GROQ_API_KEY", "")
-        if not api_key or not news_items:
-            return None
 
-        headlines = "\n".join([f"- {n.get('title','')}" for n in news_items[:5]])
-
-        prompt = f"""You are a financial news analyst. Analyze these {company_name} ({ticker}) headlines and for each one give:
-1. SENTIMENT: BULLISH / BEARISH / NEUTRAL
-2. ONE LINE: Why it matters for the stock
-
-Headlines:
-{headlines}
-
-Respond ONLY in JSON array format, no markdown:
-[
-  {{"headline": "...", "sentiment": "BULLISH/BEARISH/NEUTRAL", "impact": "one line why it matters"}},
-  ...
-]"""
-
-        response = requests.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
-            json={"model": "llama-3.3-70b-versatile", "max_tokens": 800, "temperature": 0.2,
-                  "messages": [{"role": "user", "content": prompt}]},
-            timeout=20
-        )
-        raw = response.json()["choices"][0]["message"]["content"]
-        raw = raw.strip().replace("```json","").replace("```","").strip()
-        return json.loads(raw)
-    except Exception:
-        return None
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def get_top5_stocks():
-    """Score a curated watchlist and return top 5 — includes AI powers estimate."""
-    # Curated list of quality compounders across sectors
-    watchlist = [
-        "AAPL","MSFT","NVDA","GOOGL","META","AMZN","LLY","V","MA",
-        "COST","AVGO","NOW","ADBE","INTU","UNH","JPM","BRK-B","TSLA","AMD","CRM"
-    ]
-    results = []
-    for t in watchlist:
-        try:
-            tk = yf.Ticker(t)
-            info = tk.info or {}
-            hist = add_ta(tk.history(period="6mo", auto_adjust=True))
-            fin  = tk.financials
-            bal  = tk.balance_sheet
-            cf   = tk.cashflow
-            res  = score(info, hist, fin, bal, cf)
-
-            # Estimate AI powers from sector/margin heuristics (no API call in batch)
-            gm = sg(info,"grossMargins",np.nan) or 0
-            sector = (sg(info,"sector","") or "").lower()
-            industry = (sg(info,"industry","") or "").lower()
-            estimated_powers = 0
-            if gm > 0.50: estimated_powers += 1          # likely scale/branding
-            if "software" in industry or "internet" in sector: estimated_powers += 2
-            if "semiconductor" in industry: estimated_powers += 1
-            if sg(info,"marketCap",0) > 100e9: estimated_powers += 1  # scale
-            if gm > 0.70: estimated_powers += 1           # strong branding/switching costs
-            estimated_pw_score = min(20, estimated_powers * (20/7))
-
-            total = round(min(100, res["total"] + estimated_pw_score), 1)
-            price_v = get_price(info, hist)
-            prev = sg(info,"previousClose",np.nan)
-            day_chg = (price_v-prev)/prev if not np.isnan(price_v) and not np.isnan(prev) and prev>0 else np.nan
-
-            results.append({
-                "ticker":  t,
-                "name":    sg(info,"shortName", t),
-                "score":   total,
-                "price":   price_v,
-                "chg":     day_chg,
-                "signal":  get_signal_from_score(total, hist)[0],
-                "sector":  sg(info,"sector","—"),
-                "gm":      gm,
-            })
-        except Exception:
-            continue
-    results.sort(key=lambda x: x["score"], reverse=True)
-    return results[:5]
 
 
 def get_price(info, hist):
@@ -723,41 +638,50 @@ def price_chart(hist, ticker):
     fig.update_layout(
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="#0d1220",
-        font=dict(color="#94a3b8", family="Inter", size=11),
+        font=dict(color="#cbd5e1", family="Inter", size=11),
         height=560,
         showlegend=True,
         legend=dict(
             orientation="h", yanchor="bottom", y=1.02,
             xanchor="left", x=0,
-            font=dict(size=10),
-            bgcolor="rgba(0,0,0,0)",
+            font=dict(size=11, color="#e2e8f0"),
+            bgcolor="rgba(13,18,32,0.8)",
+            bordercolor="#2d3a5e",
+            borderwidth=1,
         ),
         hovermode="x unified",
         xaxis_rangeslider_visible=False,
-        margin=dict(l=60, r=30, t=30, b=30),
+        margin=dict(l=65, r=30, t=40, b=30),
     )
-    # Grid styling per row
+    # Grid and tick styling per row
     for i in range(1, 4):
         fig.update_xaxes(
             row=i, col=1,
-            gridcolor="rgba(30,42,69,0.8)",
+            gridcolor="rgba(45,58,94,0.6)",
             linecolor="#2d3a5e",
             showgrid=True,
             zeroline=False,
+            tickfont=dict(color="#94a3b8", size=10),
         )
         fig.update_yaxes(
             row=i, col=1,
-            gridcolor="rgba(30,42,69,0.8)",
+            gridcolor="rgba(45,58,94,0.6)",
             linecolor="#2d3a5e",
             showgrid=True,
             zeroline=False,
+            tickfont=dict(color="#94a3b8", size=10),
         )
-    fig.update_yaxes(title_text="Price", row=1, col=1,
-                     title_font=dict(size=10), tickprefix="$")
-    fig.update_yaxes(title_text="Vol",   row=2, col=1,
-                     title_font=dict(size=10))
-    fig.update_yaxes(title_text="RSI",   row=3, col=1,
-                     title_font=dict(size=10), range=[0, 100])
+    fig.update_yaxes(title_text="Price ($)", row=1, col=1,
+                     title_font=dict(size=10, color="#94a3b8"), tickprefix="$",
+                     tickfont=dict(color="#94a3b8"))
+    fig.update_yaxes(title_text="Volume",   row=2, col=1,
+                     title_font=dict(size=10, color="#94a3b8"))
+    fig.update_yaxes(title_text="RSI",      row=3, col=1,
+                     title_font=dict(size=10, color="#94a3b8"), range=[0, 100])
+    # Subplot title colors
+    for ann in fig.layout.annotations:
+        ann.font.color = "#94a3b8"
+        ann.font.size  = 10
     return fig
 
 def gauge_chart(s):
@@ -881,60 +805,44 @@ def main():
     is_etf = quote_type in ["ETF", "MUTUALFUND"] or sg(info, "fundFamily", None) is not None
 
     if is_etf:
-        etf_website = sg(info,"website","")
-        etf_logo = ""
-        if etf_website:
-            try:
-                domain = etf_website.replace("https://","").replace("http://","").replace("www.","").split("/")[0]
-                etf_logo = f'<img src="https://logo.clearbit.com/{domain}" style="height:38px;width:38px;border-radius:6px;object-fit:contain;background:#fff;padding:3px;margin-right:10px;vertical-align:middle;" onerror="this.style.display=\'none\'">'
-            except: pass
-        st.markdown(f"""
-        <div style="background:#1a1f35;border:1px solid #2d3a5e;border-radius:12px;padding:20px 24px;margin-bottom:16px;display:flex;align-items:center;">
-            {etf_logo}
-            <div>
-                <div style="font-size:1.3rem;font-weight:700;color:#f1f5f9;">{sg(info,'longName',ticker)}</div>
-                <div style="font-size:0.8rem;color:#64748b;margin-top:4px;">📊 ETF / Fund · {sg(info,'category','—')} · {sg(info,'fundFamily','—')}</div>
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-
+        etf_name = sg(info,"longName",ticker)
         price_etf = get_price(info, hist)
         prev_etf  = sg(info,"previousClose",np.nan)
         if np.isnan(prev_etf) and not hist.empty and len(hist)>=2:
             prev_etf = float(hist["Close"].iloc[-2])
-        chg_etf = (price_etf-prev_etf)/prev_etf if not np.isnan(price_etf) and not np.isnan(prev_etf) and prev_etf>0 else np.nan
+        chg_etf   = (price_etf-prev_etf)/prev_etf if not np.isnan(price_etf) and not np.isnan(prev_etf) and prev_etf>0 else np.nan
         chg_c_etf = "#10b981" if (isinstance(chg_etf,float) and not np.isnan(chg_etf) and chg_etf>=0) else "#ef4444"
+        aum       = sg(info,"totalAssets",np.nan)
+        exp_ratio = sg(info,"annualReportExpenseRatio",np.nan)
+        category  = sg(info,"category","—")
+        fund_fam  = sg(info,"fundFamily","—")
+        w52h      = sg(info,"fiftyTwoWeekHigh",np.nan)
+        w52l      = sg(info,"fiftyTwoWeekLow",np.nan)
 
-        e1,e2,e3,e4,e5,e6 = st.columns(6)
-        for col,(lbl,val) in zip([e1,e2,e3,e4,e5,e6],[
-            ("Price",       f"${price_etf:.2f}" if not np.isnan(price_etf) else "N/A"),
-            ("Day Chg",     f'<span style="color:{chg_c_etf}">{pct(chg_etf)}</span>'),
-            ("52W High",    f"${sg(info,'fiftyTwoWeekHigh',np.nan):.2f}" if not np.isnan(sg(info,'fiftyTwoWeekHigh',np.nan)) else "N/A"),
-            ("52W Low",     f"${sg(info,'fiftyTwoWeekLow',np.nan):.2f}"  if not np.isnan(sg(info,'fiftyTwoWeekLow',np.nan))  else "N/A"),
-            ("Expense Ratio",pct(sg(info,'annualReportExpenseRatio',np.nan))),
-            ("AUM",         fmt(sg(info,'totalAssets',np.nan),pre="$")),
+        st.markdown(f'''
+        <div style="background:#151c30;border:1px solid #2d3a5e;border-radius:12px;padding:22px 28px;margin-bottom:20px;">
+            <div style="font-size:1.7rem;font-weight:700;color:#f1f5f9;margin-bottom:4px;">{etf_name}</div>
+            <div style="font-size:0.82rem;color:#64748b;">📊 ETF &nbsp;·&nbsp; {category} &nbsp;·&nbsp; {fund_fam}</div>
+        </div>
+        ''', unsafe_allow_html=True)
+
+        c1,c2,c3,c4,c5,c6 = st.columns(6)
+        for col,(lbl,val) in zip([c1,c2,c3,c4,c5,c6],[
+            ("Price",         f"${price_etf:.2f}" if not np.isnan(price_etf) else "N/A"),
+            ("Day Change",    f'<span style="color:{chg_c_etf}">{pct(chg_etf)}</span>'),
+            ("52W High",      f"${w52h:.2f}" if not np.isnan(w52h) else "N/A"),
+            ("52W Low",       f"${w52l:.2f}" if not np.isnan(w52l) else "N/A"),
+            ("Expense Ratio", pct(exp_ratio) if not np.isnan(exp_ratio) else "N/A"),
+            ("AUM",           fmt(aum,pre="$")),
         ]):
             with col: st.markdown(mc(lbl,val), unsafe_allow_html=True)
 
-        st.markdown("---")
-        col_p, col_n = st.columns([1,1])
-        with col_p:
-            if not hist.empty:
-                st.plotly_chart(price_chart(hist, ticker), use_container_width=True, config={"displayModeBar":False})
-        with col_n:
-            st.markdown('<div class="section-header">📰 Latest News</div>', unsafe_allow_html=True)
-            sorted_news = sorted([n for n in news if n.get("providerPublishTime")],
-                                  key=lambda x: x.get("providerPublishTime",0), reverse=True)[:5]
-            for item in (sorted_news or news[:5]):
-                try:
-                    title=item.get("title",""); pub=item.get("publisher",""); link=item.get("link","#")
-                    ts=item.get("providerPublishTime",None)
-                    date=datetime.fromtimestamp(ts).strftime("%b %d, %Y") if ts else "—"
-                    st.markdown(f'<div class="news-card"><a href="{link}" target="_blank" style="text-decoration:none;"><div class="news-title">{title}</div></a><div class="news-meta">📰 {pub} · {date}</div></div>', unsafe_allow_html=True)
-                except: continue
-
-        st.info("⚠️ ETF detected — the full scoring model (Quality, Valuation, 7 Powers) is designed for individual stocks and does not apply to ETFs. Showing price chart and news only.")
+        st.markdown("")
+        if not hist.empty:
+            st.plotly_chart(price_chart(hist, ticker), use_container_width=True, config={"displayModeBar":False})
+        st.markdown(ic("ETF/Fund detected — the scoring model (Quality, Valuation, 7 Powers) is for individual stocks only.", "#f59e0b", "⚠️ ETF"), unsafe_allow_html=True)
         return
+
 
     res = score(info, hist, fin, bal, cf)
     rl   = risk_level(res["det"])
@@ -1011,24 +919,13 @@ def main():
         w52l     = sg(info,"fiftyTwoWeekLow",np.nan)
         website  = sg(info,"website","")
 
-        # Company logo via Clearbit (free, no API key needed)
-        logo_html = ""
-        if website:
-            try:
-                domain = website.replace("https://","").replace("http://","").replace("www.","").split("/")[0]
-                logo_url = f"https://logo.clearbit.com/{domain}"
-                logo_html = f'<img src="{logo_url}" style="height:42px;width:42px;border-radius:8px;object-fit:contain;background:#fff;padding:3px;margin-right:12px;vertical-align:middle;" onerror="this.style.display=\'none\'">'
-            except: pass
-
         st.markdown(f'''
-        <div style="display:flex;align-items:center;margin-bottom:8px;">
-            {logo_html}
-            <div>
-                <div style="font-size:1.45rem;font-weight:700;color:#f1f5f9;line-height:1.2;">{name}</div>
-                <div style="font-size:0.8rem;color:#64748b;">{ticker} · {sector} · {industry}</div>
-            </div>
+        <div style="margin-bottom:10px;">
+            <div style="font-size:1.5rem;font-weight:700;color:#f1f5f9;line-height:1.2;">{name}</div>
+            <div style="font-size:0.8rem;color:#64748b;margin-top:3px;">{ticker} &nbsp;·&nbsp; {sector} &nbsp;·&nbsp; {industry}</div>
         </div>
         ''', unsafe_allow_html=True)
+
 
         chg_c="#10b981" if (isinstance(day_chg,float) and not np.isnan(day_chg) and day_chg>=0) else "#ef4444"
         cols = st.columns(6)
@@ -1313,64 +1210,30 @@ def main():
 
     st.markdown("---")
 
-    # ── ROW 6: News + AI Sentiment ───────────────────────────────────────────
-    st.markdown('<div class="section-header">📰 Latest News + AI Sentiment</div>', unsafe_allow_html=True)
+    st.markdown("---")
 
-    sorted_news = []
+    # ── ROW 6: Latest News ───────────────────────────────────────────────────
+    st.markdown('<div class="section-header">📰 Latest News</div>', unsafe_allow_html=True)
     if news:
         sorted_news = sorted([n for n in news if n.get("providerPublishTime")],
                              key=lambda x: x.get("providerPublishTime",0), reverse=True)[:5]
         if not sorted_news: sorted_news = news[:5]
-
-    if sorted_news:
-        with st.spinner("🤖 Analyzing news sentiment..."):
-            sentiments = ai_news_sentiment(ticker, name, sorted_news)
-
-        sent_map = {}
-        if sentiments:
-            for item in sentiments:
-                key = item.get("headline","")[:40]
-                sent_map[key] = item
-
-        for i, item in enumerate(sorted_news):
+        for item in sorted_news:
             try:
                 title = item.get("title","No title")
-                pub   = item.get("publisher","Unknown")
                 link  = item.get("link","#")
+                pub   = item.get("publisher","")
                 ts    = item.get("providerPublishTime",None)
-                date  = datetime.fromtimestamp(ts).strftime("%b %d, %Y") if ts else "—"
-
-                # Match sentiment
-                sent_data = None
-                for key, val in sent_map.items():
-                    if key.lower() in title.lower() or title.lower()[:40] in key.lower():
-                        sent_data = val
-                        break
-                if not sent_data and sentiments and i < len(sentiments):
-                    sent_data = sentiments[i]
-
-                sent_label = sent_data.get("sentiment","NEUTRAL") if sent_data else "NEUTRAL"
-                sent_impact = sent_data.get("impact","") if sent_data else ""
-                sent_color = "#10b981" if sent_label=="BULLISH" else "#ef4444" if sent_label=="BEARISH" else "#f59e0b"
-                sent_icon  = "🟢" if sent_label=="BULLISH" else "🔴" if sent_label=="BEARISH" else "🟡"
-
-                st.markdown(f"""
-                <div class="news-card">
-                    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;">
-                        <a href="{link}" target="_blank" style="text-decoration:none;flex:1;">
-                            <div class="news-title">{title}</div>
-                        </a>
-                        <span style="font-size:0.72rem;font-weight:700;color:{sent_color};white-space:nowrap;padding:2px 8px;background:rgba(0,0,0,0.3);border-radius:8px;border:1px solid {sent_color};">{sent_icon} {sent_label}</span>
-                    </div>
-                    <div class="news-meta">📰 {pub} &nbsp;·&nbsp; 🕐 {date}</div>
-                    {"<div style='font-size:0.78rem;color:#64748b;margin-top:4px;'>💡 " + sent_impact + "</div>" if sent_impact else ""}
+                date  = datetime.fromtimestamp(ts).strftime("%b %d, %Y") if ts else ""
+                st.markdown(f'''
+                <div style="background:#0f1525;border:1px solid #1e2a45;border-radius:8px;padding:10px 14px;margin:5px 0;">
+                    <a href="{link}" target="_blank" style="text-decoration:none;color:#e2e8f0;font-size:0.88rem;font-weight:500;line-height:1.4;">{title}</a>
+                    <div style="font-size:0.7rem;color:#475569;margin-top:4px;">{pub}{" · " + date if date else ""}</div>
                 </div>
-                """, unsafe_allow_html=True)
+                ''', unsafe_allow_html=True)
             except: continue
     else:
-        st.info("No recent news available for this ticker.")
-
-    st.markdown("---")
+        st.info("No recent news available.")
 
     # ── ROW 7: Bull / Bear ───────────────────────────────────────────────────
     cb1, cb2 = st.columns(2)
@@ -1458,38 +1321,7 @@ def main():
            "AVOID":"Score<50. Do not enter."}
     st.markdown(ic(logic.get(signal,""),sig_color,"Signal Rationale"), unsafe_allow_html=True)
 
-    st.markdown("---")
-
-    # ── TOP 5 STOCKS OF THE DAY ──────────────────────────────────────────────
-    st.markdown('<div class="section-header">🏅 Top 5 Stocks Today — Ranked by War Room Score</div>', unsafe_allow_html=True)
-    st.markdown('<div style="font-size:0.78rem;color:#64748b;margin-bottom:10px;">Screened from a quality watchlist · Scored by our 100-pt model · Updates every hour</div>', unsafe_allow_html=True)
-
-    with st.spinner("Scoring top stocks..."):
-        top5 = get_top5_stocks()
-
-    if top5:
-        cols_top = st.columns(5)
-        for col, stock in zip(cols_top, top5):
-            sig_c = {"STRONG BUY":"#10b981","BUY":"#3b82f6","NEUTRAL":"#f59e0b","AVOID":"#ef4444"}.get(stock["signal"],"#94a3b8")
-            chg_c = "#10b981" if not np.isnan(stock["chg"]) and stock["chg"]>=0 else "#ef4444"
-            chg_str = f"{stock['chg']*100:+.1f}%" if not np.isnan(stock["chg"]) else "N/A"
-            price_str = f"${stock['price']:.2f}" if not np.isnan(stock["price"]) else "N/A"
-            with col:
-                st.markdown(f"""
-                <div style="background:#151c30;border:1px solid {sig_c};border-radius:10px;padding:14px;text-align:center;">
-                    <div style="font-family:'JetBrains Mono',monospace;font-size:1.2rem;font-weight:700;color:#f1f5f9;">{stock['ticker']}</div>
-                    <div style="font-size:0.7rem;color:#64748b;margin:2px 0 6px;">{stock['name'][:18]}</div>
-                    <div style="font-family:'JetBrains Mono',monospace;font-size:2rem;font-weight:700;color:{sig_c};">{stock['score']:.0f}</div>
-                    <div style="font-size:0.65rem;color:#475569;">Score / 100</div>
-                    <div style="margin-top:6px;font-size:0.82rem;color:#e2e8f0;">{price_str}</div>
-                    <div style="font-size:0.78rem;color:{chg_c};">{chg_str}</div>
-                    <div style="margin-top:6px;font-size:0.68rem;font-weight:700;color:{sig_c};background:rgba(0,0,0,0.3);padding:2px 6px;border-radius:6px;">{stock['signal']}</div>
-                </div>
-                """, unsafe_allow_html=True)
-    else:
-        st.info("Unable to load top stocks at this time.")
-
-    st.markdown('<div style="text-align:center;color:#334155;font-size:0.7rem;margin-top:20px;padding-top:10px;border-top:1px solid #1e2a45;">War Room Terminal · For educational purposes only — Not financial advice</div>', unsafe_allow_html=True)
+    st.markdown('<div style="text-align:center;color:#334155;font-size:0.7rem;margin-top:24px;padding-top:10px;border-top:1px solid #1e2a45;">War Room Terminal · For educational purposes only — Not financial advice</div>', unsafe_allow_html=True)
 
 if __name__ == "__main__":
     main()
