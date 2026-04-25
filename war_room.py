@@ -10,8 +10,6 @@ import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import warnings
-import requests
-import json
 from datetime import datetime
 
 warnings.filterwarnings("ignore")
@@ -561,60 +559,173 @@ def risk_lvl(det):
 ALL_POWERS = ["Scale Economies","Network Economies","Counter-Positioning",
               "Switching Costs","Branding","Cornered Resource","Process Power"]
 
-def get_groq_key():
-    """Safely get Groq API key from Streamlit secrets."""
-    try:
-        # Method 1: direct key access (most reliable on Streamlit Cloud)
-        return st.secrets["GROQ_API_KEY"]
-    except Exception:
-        pass
-    try:
-        # Method 2: .get() method
-        return st.secrets.get("GROQ_API_KEY", "")
-    except Exception:
-        pass
-    try:
-        # Method 3: nested under [groq] section
-        return st.secrets["groq"]["GROQ_API_KEY"]
-    except Exception:
-        pass
-    return ""
+def analyze_7_powers(info, fin, cf, ticker, sector, industry, stage):
+    """
+    Rule-based 7 Powers analysis using Helmer's framework.
+    Based on financial data, sector, margins, and business characteristics.
+    Returns dict with verdict + reasoning for each power.
+    """
+    results = {}
+    sector   = (sector or "").lower()
+    industry = (industry or "").lower()
+    desc     = (sg(info,"longBusinessSummary","") or "").lower()
 
-def analyze_7_powers(ticker, name, sector, industry, desc, gm, om, rg, mktcap, stage):
-    api_key = get_groq_key()
-    if not api_key:
-        return None
+    gm      = safe_float(sg(info,"grossMargins",    np.nan)) or 0
+    om      = safe_float(sg(info,"operatingMargins", np.nan)) or 0
+    rg      = safe_float(sg(info,"revenueGrowth",    np.nan)) or 0
+    mktcap  = safe_float(sg(info,"marketCap",        np.nan)) or 0
+    rd      = safe_float(sg(info,"researchAndDevelopment", np.nan))
+    if np.isnan(rd):
+        rd = sr(fin, "Research And Development") or 0
+    rev     = safe_float(sg(info,"totalRevenue",     np.nan)) or 1
+    fcf     = safe_float(sg(info,"freeCashflow",     np.nan)) or 0
+    de      = safe_float(sg(info,"debtToEquity",     np.nan)) or 0
+    emp     = safe_float(sg(info,"fullTimeEmployees",np.nan)) or 0
+    rd_pct  = rd / rev if rev > 0 and not np.isnan(rd) else 0
 
-    prompt = f"""Expert equity analyst using Hamilton Helmer's 7 Powers framework.
+    is_software   = any(x in industry for x in ["software","saas","cloud","internet","data"])
+    is_semis      = any(x in industry for x in ["semiconductor","chip"])
+    is_consumer   = any(x in sector   for x in ["consumer","retail"])
+    is_finance    = any(x in sector   for x in ["financial","bank"])
+    is_pharma     = any(x in industry for x in ["drug","pharma","biotech","health"])
+    is_marketplace= any(x in desc     for x in ["marketplace","platform","network","exchange"])
+    is_payments   = any(x in industry for x in ["payment","credit","transaction"])
+    is_luxury     = any(x in desc     for x in ["luxury","premium","heritage","exclusive"])
+    is_large      = mktcap > 100e9
+    is_mega       = mktcap > 500e9
 
-Company: {name} ({ticker}) | Sector: {sector} | Industry: {industry}
-Stage: {stage} | Gross Margin: {gm} | Operating Margin: {om} | Revenue Growth: {rg} | Market Cap: {mktcap}
-Description: {(desc or '')[:500]}
+    # ── 1. SCALE ECONOMIES ───────────────────────────────────────────────────
+    # Evidence: large market cap (high volume), improving margins, capital-intensive moat
+    if is_mega and gm > 0.45:
+        v = "YES"
+        r = f"Mega-cap with {gm*100:.0f}% gross margins — massive fixed-cost base spread over huge revenue gives structural cost advantage competitors can't match."
+    elif is_large and gm > 0.35 and om > 0.15:
+        v = "YES"
+        r = f"Scale drives margin superiority: {gm*100:.0f}% gross / {om*100:.0f}% operating margin at ${mktcap/1e9:.0f}B scale makes per-unit economics hard for smaller rivals to replicate."
+    elif is_semis and is_large:
+        v = "YES"
+        r = "Semiconductor fabs cost $20B+ — scale is the defining competitive barrier; only a handful of players can operate at sufficient volume to be cost-competitive."
+    elif mktcap > 20e9 and gm > 0.25:
+        v = "PARTIAL"
+        r = f"Some scale advantage visible in margins ({gm*100:.0f}% gross), but not yet at the level where scale becomes a prohibitive barrier to entry."
+    else:
+        v = "NO"
+        r = "Insufficient scale or margins to suggest a meaningful cost advantage over competitors based on volume alone."
+    results["Scale Economies"] = {"verdict": v, "reasoning": r}
 
-For each power give VERDICT (YES/PARTIAL/NO) and 1-sentence REASONING.
-Return ONLY valid JSON, no markdown:
-{{"Scale Economies":{{"verdict":"YES","reasoning":"..."}},"Network Economies":{{"verdict":"NO","reasoning":"..."}},"Counter-Positioning":{{"verdict":"NO","reasoning":"..."}},"Switching Costs":{{"verdict":"YES","reasoning":"..."}},"Branding":{{"verdict":"NO","reasoning":"..."}},"Cornered Resource":{{"verdict":"NO","reasoning":"..."}},"Process Power":{{"verdict":"NO","reasoning":"..."}}}}"""
+    # ── 2. NETWORK ECONOMIES ─────────────────────────────────────────────────
+    # Evidence: marketplace/platform, payments, social, communications
+    if is_payments and is_large:
+        v = "YES"
+        r = "Payment networks are classic two-sided markets — more merchants attract more cardholders and vice versa, creating a self-reinforcing loop that is nearly impossible to displace."
+    elif is_marketplace and is_large:
+        v = "YES"
+        r = "Platform/marketplace business: each additional buyer attracts more sellers and vice versa. Network density is the core competitive advantage."
+    elif is_software and is_large and any(x in desc for x in ["ecosystem","developer","api","integration"]):
+        v = "YES"
+        r = "Large developer/integration ecosystem creates indirect network effects — more integrations make the platform more valuable, increasing switching costs for all participants."
+    elif is_marketplace or (is_software and any(x in desc for x in ["community","user","connect"])):
+        v = "PARTIAL"
+        r = "Some network characteristics present, but network effects appear local or limited in scope rather than global and winner-take-most."
+    else:
+        v = "NO"
+        r = "No clear evidence of network effects — additional users do not appear to meaningfully increase value for existing users."
+    results["Network Economies"] = {"verdict": v, "reasoning": r}
 
-    for _ in range(3):
-        try:
-            r = requests.post(
-                "https://api.groq.com/openai/v1/chat/completions",
-                headers={"Content-Type":"application/json","Authorization":f"Bearer {api_key}"},
-                json={"model":"llama3-70b-8192","max_tokens":800,"temperature":0.1,
-                      "messages":[{"role":"user","content":prompt}]},
-                timeout=25
-            )
-            if r.status_code != 200: continue
-            raw = r.json()["choices"][0]["message"]["content"].strip()
-            # Extract JSON from anywhere in the response
-            start = raw.find("{")
-            end   = raw.rfind("}") + 1
-            if start >= 0 and end > start:
-                result = json.loads(raw[start:end])
-                if all(p in result for p in ALL_POWERS):
-                    return result
-        except: continue
-    return None
+    # ── 3. COUNTER-POSITIONING ───────────────────────────────────────────────
+    # Evidence: disruptive model, high growth vs low-growth incumbents, new category
+    if rg > 0.25 and stage == "growth" and gm > 0.50:
+        v = "YES"
+        r = f"Fast-growing ({rg*100:.0f}% revenue growth) with high margins in a category where incumbents risk cannibalization by adopting this model — classic counter-positioning setup."
+    elif rg > 0.15 and any(x in desc for x in ["disrupt","transform","replace","legacy","traditional"]):
+        v = "PARTIAL"
+        r = f"Growth trajectory ({rg*100:.0f}%) and disruptive positioning suggest some counter-positioning, but incumbent response remains possible."
+    elif stage == "growth" and rg > 0.10:
+        v = "PARTIAL"
+        r = "Growth-stage company in an evolving market — may be building counter-positioning advantage, but too early to confirm incumbents are structurally unable to respond."
+    else:
+        v = "NO"
+        r = "No clear evidence of a business model that incumbents are structurally prevented from copying due to cannibalization risk."
+    results["Counter-Positioning"] = {"verdict": v, "reasoning": r}
+
+    # ── 4. SWITCHING COSTS ───────────────────────────────────────────────────
+    # Evidence: enterprise software, ERP, financial data, deep integrations
+    if is_software and is_large and gm > 0.65:
+        v = "YES"
+        r = f"Enterprise software with {gm*100:.0f}% gross margins — deep workflow integrations, data migration complexity, and retraining costs make switching prohibitively expensive for customers."
+    elif is_finance and any(x in desc for x in ["terminal","data","analytics","workflow"]):
+        v = "YES"
+        r = "Financial data/analytics platforms embed deeply into daily workflows — years of custom screens, historical data, and muscle memory create switching costs that far exceed subscription cost."
+    elif is_software and gm > 0.55:
+        v = "PARTIAL"
+        r = f"Software business with strong margins ({gm*100:.0f}%) suggests some stickiness, but switching costs appear moderate rather than prohibitive."
+    elif is_finance or any(x in desc for x in ["enterprise","erp","crm","workflow"]):
+        v = "PARTIAL"
+        r = "B2B/enterprise focus implies some switching friction, but the depth of integration and true lock-in is unclear from available data."
+    else:
+        v = "NO"
+        r = "Consumer or commodity business where switching to a competitor involves minimal cost, effort, or risk."
+    results["Switching Costs"] = {"verdict": v, "reasoning": r}
+
+    # ── 5. BRANDING ──────────────────────────────────────────────────────────
+    # Evidence: consumer premium brand, luxury, high gross margins in consumer sector
+    if is_luxury and gm > 0.60:
+        v = "YES"
+        r = f"Luxury brand with {gm*100:.0f}% gross margins — pricing power is clearly derived from brand perception rather than material cost, with customers paying large premiums over functionally equivalent alternatives."
+    elif is_consumer and gm > 0.40 and is_large:
+        v = "YES"
+        r = f"Strong consumer brand at scale: {gm*100:.0f}% gross margins in a consumer category suggest customers pay a meaningful premium specifically for the brand, not just the product."
+    elif is_consumer and gm > 0.30:
+        v = "PARTIAL"
+        r = f"Some brand premium visible in margins ({gm*100:.0f}%), but pricing power may be partially attributable to other factors like distribution or scale."
+    elif any(x in desc for x in ["brand","consumer","lifestyle","design"]) and gm > 0.35:
+        v = "PARTIAL"
+        r = "Brand language in company description and above-average margins suggest emerging brand value, but premium pricing power is not yet clearly dominant."
+    else:
+        v = "NO"
+        r = "B2B or commodity-adjacent business where purchasing decisions are driven by specs and price rather than brand affinity."
+    results["Branding"] = {"verdict": v, "reasoning": r}
+
+    # ── 6. CORNERED RESOURCE ─────────────────────────────────────────────────
+    # Evidence: high R&D, patents, proprietary data, regulatory licenses
+    if is_pharma and rd_pct > 0.15:
+        v = "YES"
+        r = f"Pharma/biotech with {rd_pct*100:.0f}% R&D intensity — patent portfolio and FDA-approved compounds represent legally protected cornered resources with time-limited but strong exclusivity."
+    elif is_semis and rd_pct > 0.10:
+        v = "YES"
+        r = f"Semiconductor IP with {rd_pct*100:.0f}% R&D spend — proprietary chip architectures, process nodes, and design tools represent cornered resources that take decades to replicate."
+    elif rd_pct > 0.12 and gm > 0.60:
+        v = "YES"
+        r = f"High R&D intensity ({rd_pct*100:.0f}% of revenue) combined with strong margins suggests proprietary technology or data assets that competitors cannot easily acquire or build."
+    elif rd_pct > 0.06 or any(x in desc for x in ["patent","proprietary","exclusive","license","spectrum"]):
+        v = "PARTIAL"
+        r = f"Some evidence of proprietary assets (R&D at {rd_pct*100:.1f}% of revenue), but exclusivity depth and remaining economic life are unclear."
+    else:
+        v = "NO"
+        r = "No clear evidence of exclusive access to a scarce asset — technology, talent, or resources appear replicable by well-funded competitors."
+    results["Cornered Resource"] = {"verdict": v, "reasoning": r}
+
+    # ── 7. PROCESS POWER ─────────────────────────────────────────────────────
+    # Evidence: persistent outperformance, manufacturing excellence, operational culture
+    fcf_margin = fcf / rev if rev > 0 else 0
+    if om > 0.30 and gm > 0.50 and is_large:
+        v = "YES"
+        r = f"Sustained {om*100:.0f}% operating margins at scale are difficult to explain by other factors alone — suggests deeply embedded operational efficiency that competitors have not been able to replicate."
+    elif any(x in desc for x in ["lean","kaizen","six sigma","operational excellence","danaher","manufacturing"]) and om > 0.15:
+        v = "YES"
+        r = "Explicit operational excellence culture referenced in business description — embedded process systems that drive consistent outperformance are a hallmark of process power."
+    elif om > 0.20 and fcf_margin > 0.15:
+        v = "PARTIAL"
+        r = f"Above-average operating margins ({om*100:.0f}%) and strong FCF conversion suggest operational discipline, but whether this constitutes truly embedded process power vs. scale or switching costs is unclear."
+    elif om > 0.12:
+        v = "PARTIAL"
+        r = f"Decent operating margin ({om*100:.0f}%) hints at operational efficiency, but consistent long-term outperformance data needed to confirm genuine process power."
+    else:
+        v = "NO"
+        r = "Operating margins do not suggest embedded process superiority over peers — no evidence of a proprietary operational system driving persistent outperformance."
+    results["Process Power"] = {"verdict": v, "reasoning": r}
+
+    return results
 
 # ── CHARTS ────────────────────────────────────────────────────────────────────
 def price_chart(hist, ticker):
@@ -859,17 +970,8 @@ with tab_research:
         industry = sg(info,"industry","—")
         stage    = det.get("stage","mature")
 
-        # AI 7 Powers
-        with st.spinner("🤖 Running 7 Powers AI analysis..."):
-            powers_ai = analyze_7_powers(
-                ticker=ticker, name=name, sector=sector, industry=industry,
-                desc=sg(info,"longBusinessSummary",""),
-                gm=pct(sg(info,"grossMargins",np.nan)),
-                om=pct(sg(info,"operatingMargins",np.nan)),
-                rg=pct(sg(info,"revenueGrowth",np.nan)),
-                mktcap=fmtn(sg(info,"marketCap",np.nan),pre="$"),
-                stage=stage,
-            )
+        # Rule-based 7 Powers (instant, no API needed)
+        powers_ai = analyze_7_powers(info, fin, cf, ticker, sector, industry, stage)
 
         if powers_ai:
             ai_confirmed = [p for p,v in powers_ai.items() if v.get("verdict","NO").upper().startswith("YES")]
@@ -1078,11 +1180,7 @@ with tab_research:
                         </div>
                         """, unsafe_allow_html=True)
             else:
-                key_found = bool(get_groq_key())
-                if key_found:
-                    st.warning("⚠️ Groq API key found but AI analysis failed — Groq may be rate-limited or down. Try again in a moment.")
-                else:
-                    st.warning("⚠️ GROQ_API_KEY not found in Streamlit secrets. Go to your app → ⋮ → Settings → Secrets and add: `GROQ_API_KEY = \"gsk_...\"` then save.")
+                st.info("7 Powers analysis unavailable for this ticker — insufficient data.")
                 for p in ALL_POWERS:
                     from_7p = {
                         "Scale Economies": "Does unit cost fall as volume grows?",
