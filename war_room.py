@@ -561,9 +561,29 @@ def risk_lvl(det):
 ALL_POWERS = ["Scale Economies","Network Economies","Counter-Positioning",
               "Switching Costs","Branding","Cornered Resource","Process Power"]
 
+def get_groq_key():
+    """Safely get Groq API key from Streamlit secrets."""
+    try:
+        # Method 1: direct key access (most reliable on Streamlit Cloud)
+        return st.secrets["GROQ_API_KEY"]
+    except Exception:
+        pass
+    try:
+        # Method 2: .get() method
+        return st.secrets.get("GROQ_API_KEY", "")
+    except Exception:
+        pass
+    try:
+        # Method 3: nested under [groq] section
+        return st.secrets["groq"]["GROQ_API_KEY"]
+    except Exception:
+        pass
+    return ""
+
 def analyze_7_powers(ticker, name, sector, industry, desc, gm, om, rg, mktcap, stage):
-    api_key = st.secrets.get("GROQ_API_KEY","")
-    if not api_key: return None
+    api_key = get_groq_key()
+    if not api_key:
+        return None
 
     prompt = f"""Expert equity analyst using Hamilton Helmer's 7 Powers framework.
 
@@ -1058,7 +1078,11 @@ with tab_research:
                         </div>
                         """, unsafe_allow_html=True)
             else:
-                st.warning("⚠️ AI analysis unavailable. Add GROQ_API_KEY to Streamlit secrets (free at console.groq.com).")
+                key_found = bool(get_groq_key())
+                if key_found:
+                    st.warning("⚠️ Groq API key found but AI analysis failed — Groq may be rate-limited or down. Try again in a moment.")
+                else:
+                    st.warning("⚠️ GROQ_API_KEY not found in Streamlit secrets. Go to your app → ⋮ → Settings → Secrets and add: `GROQ_API_KEY = \"gsk_...\"` then save.")
                 for p in ALL_POWERS:
                     from_7p = {
                         "Scale Economies": "Does unit cost fall as volume grows?",
