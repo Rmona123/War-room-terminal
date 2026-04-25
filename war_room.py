@@ -122,7 +122,6 @@ def fetch_data(ticker):
     except Exception: pass
     return info, hist, fin, bal, cf, news
 
-@st.cache_data(ttl=600, show_spinner=False)
 def ai_analyze_7_powers(ticker, company_name, sector, industry, description,
                          gross_margin, op_margin, rev_cagr, market_cap, stage):
     """Call Groq API (free) to automatically analyze which of Helmer's 7 Powers apply."""
@@ -180,6 +179,76 @@ Respond ONLY in this exact JSON format, no markdown, no extra text:
         return json.loads(raw)
     except Exception:
         return None
+
+
+def ai_news_sentiment(ticker, company_name, news_items):
+    """Use Groq to analyze sentiment of latest news headlines."""
+    try:
+        api_key = st.secrets.get("GROQ_API_KEY", "")
+        if not api_key or not news_items:
+            return None
+
+        headlines = "\n".join([f"- {n.get('title','')}" for n in news_items[:5]])
+
+        prompt = f"""You are a financial news analyst. Analyze these {company_name} ({ticker}) headlines and for each one give:
+1. SENTIMENT: BULLISH / BEARISH / NEUTRAL
+2. ONE LINE: Why it matters for the stock
+
+Headlines:
+{headlines}
+
+Respond ONLY in JSON array format, no markdown:
+[
+  {{"headline": "...", "sentiment": "BULLISH/BEARISH/NEUTRAL", "impact": "one line why it matters"}},
+  ...
+]"""
+
+        response = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
+            json={"model": "llama-3.3-70b-versatile", "max_tokens": 800, "temperature": 0.2,
+                  "messages": [{"role": "user", "content": prompt}]},
+            timeout=20
+        )
+        raw = response.json()["choices"][0]["message"]["content"]
+        raw = raw.strip().replace("```json","").replace("```","").strip()
+        return json.loads(raw)
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_top5_stocks():
+    """Score a watchlist of quality stocks and return top 5 by our model."""
+    watchlist = ["AAPL","MSFT","NVDA","GOOGL","META","AMZN","BRK-B","LLY","JPM",
+                 "V","MA","COST","UNH","AVGO","TSLA","AMD","CRM","NOW","ADBE","INTU"]
+    results = []
+    for t in watchlist:
+        try:
+            tk = yf.Ticker(t)
+            info = tk.info or {}
+            hist = add_ta(tk.history(period="6mo", auto_adjust=True))
+            fin  = tk.financials
+            bal  = tk.balance_sheet
+            cf   = tk.cashflow
+            res  = score(info, hist, fin, bal, cf)
+            price_v = get_price(info, hist)
+            day_chg = np.nan
+            prev = sg(info,"previousClose",np.nan)
+            if not np.isnan(prev) and not np.isnan(price_v) and prev>0:
+                day_chg = (price_v-prev)/prev
+            results.append({
+                "ticker":  t,
+                "name":    sg(info,"shortName", t),
+                "score":   res["total"],
+                "price":   price_v,
+                "chg":     day_chg,
+                "signal":  get_signal_from_score(res["total"], hist)[0],
+            })
+        except Exception:
+            continue
+    results.sort(key=lambda x: x["score"], reverse=True)
+    return results[:5]
 
 
 def get_price(info, hist):
@@ -266,7 +335,7 @@ def fmt(v, d=2, pre="", suf=""):
     return f"{pre}{v:.{d}f}{suf}"
 
 # ── SCORING  (100 pts: Q29 + E14 + V14 + T14 + P29) ─────────────────────────
-def score(info, hist, fin, bal, cf, powers_analysis):
+def score(info, hist, fin, bal, cf):
     sc, det = {}, {}
     stage = detect_stage(info, fin)
     det["stage"] = stage
@@ -471,24 +540,36 @@ def score(info, hist, fin, bal, cf, powers_analysis):
     sc["st2"]=st2_s; sc["rsi"]=rsi_s; sc["vol"]=vol_s
     det["rsi"]=rsi_v; det["atr"]=atr_p; det["beta"]=beta
 
-    # E. 7 POWERS (29 pts) — only counts if analyst wrote justification
-    confirmed=[p for p,t in powers_analysis.items() if t and len(t.strip())>10]
-    pw_s=min(29, len(confirmed)*(29/7))
-    sc["pw"]=pw_s; sc["n_pw"]=len(confirmed)
+    # E. 7 POWERS — score comes from AI analysis AFTER the fact, starts at 0
+    # Will be overridden in main() after AI runs. Powers_analysis is empty dict here.
+    confirmed = []
+    pw_s = 0
+    sc["pw"] = pw_s; sc["n_pw"] = 0
 
-    # TOTALS
-    q = sc["crp"]+sc["om_trend"]+sc["fcf_q"]
-    e = sc["rc"]+sc["ec"]
-    v = sc["fy"]+sc["pe"]+sc["pg"]
-    tech = min(14, sc["st2"]+sc["rsi"]+sc["vol"])
-    pw = sc["pw"]
-    total = min(100, q+e+v+tech+pw)
+    # ── TOTALS
+    # New rational weights: Quality(25) + Expectations(20) + Valuation(20) + Technicals(15) + Powers(20) = 100
+    # Scale each module to its target max
+    q_raw    = sc["crp"] + sc["om_trend"] + sc["fcf_q"]   # raw max = 29
+    e_raw    = sc["rc"]  + sc["ec"]                        # raw max = 14
+    v_raw    = sc["fy"]  + sc["pe"]  + sc["pg"]            # raw max = 14
+    tech_raw = sc["st2"] + sc["rsi"] + sc["vol"]           # raw max = 14
 
-    return {"total":round(total,1),"q":round(q,1),"e":round(e,1),"v":round(v,1),
-            "tech":round(tech,1),"pw":round(pw,1),"sc":sc,"det":det,"confirmed":confirmed}
+    # Scale to new target weights
+    q    = round(min(25, q_raw    * 25 / 29), 1)
+    e    = round(min(20, e_raw    * 20 / 14), 1)
+    v    = round(min(20, v_raw    * 20 / 14), 1)
+    tech = round(min(15, tech_raw * 15 / 14), 1)
+    pw   = 0  # filled in by AI after this function
 
-def get_signal(res, hist):
-    total=res["total"]; s200_ok=rsi_ok=vol_ok=False
+    total = round(min(80, q + e + v + tech), 1)  # max 80 without powers; AI adds up to 20
+
+    return {"total": total, "q": q, "e": e, "v": v,
+            "tech": tech, "pw": pw,
+            "q_raw": q_raw, "e_raw": e_raw, "v_raw": v_raw, "tech_raw": tech_raw,
+            "sc": sc, "det": det, "confirmed": confirmed}
+
+def get_signal_from_score(total, hist):
+    s200_ok=rsi_ok=vol_ok=False
     try:
         if not hist.empty:
             last=hist.iloc[-1]; prev=hist.iloc[-2]
@@ -561,9 +642,10 @@ def gauge_chart(s):
     fig.update_layout(paper_bgcolor="rgba(0,0,0,0)",margin=dict(l=20,r=20,t=20,b=20),height=200)
     return fig
 
-def breakdown_chart(res):
-    cats=["Quality\n(29)","Expectations\n(14)","Valuation\n(14)","Technicals\n(14)","7 Powers\n(29)"]
-    maxes=[29,14,14,14,29]; vals=[res["q"],res["e"],res["v"],res["tech"],res["pw"]]
+def breakdown_chart(res, ai_pw_score=0):
+    cats=["Quality\n(25)","Expectations\n(20)","Valuation\n(20)","Technicals\n(15)","7 Powers\n(20)"]
+    maxes=[25,20,20,15,20]
+    vals=[res["q"],res["e"],res["v"],res["tech"],ai_pw_score]
     colors=["#10b981" if v/m>=0.75 else "#3b82f6" if v/m>=0.5 else "#f59e0b" if v/m>=0.25 else "#ef4444"
             for v,m in zip(vals,maxes)]
     fig=go.Figure()
@@ -665,8 +747,57 @@ def main():
     if not info and hist.empty:
         st.error(f"No data for {ticker}."); return
 
-    res = score(info, hist, fin, bal, cf, powers_analysis)
-    signal, sig_color = get_signal(res, hist)
+    # ── ETF DETECTION ─────────────────────────────────────────────────────────
+    quote_type = sg(info, "quoteType", "")
+    is_etf = quote_type in ["ETF", "MUTUALFUND"] or sg(info, "fundFamily", None) is not None
+
+    if is_etf:
+        st.markdown(f"""
+        <div style="background:#1a1f35;border:1px solid #2d3a5e;border-radius:12px;padding:20px 24px;margin-bottom:16px;">
+            <div style="font-size:1.3rem;font-weight:700;color:#f1f5f9;">{sg(info,'longName',ticker)}</div>
+            <div style="font-size:0.8rem;color:#64748b;margin-top:4px;">ETF / Fund · {sg(info,'category','—')} · {sg(info,'fundFamily','—')}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        price_etf = get_price(info, hist)
+        prev_etf  = sg(info,"previousClose",np.nan)
+        if np.isnan(prev_etf) and not hist.empty and len(hist)>=2:
+            prev_etf = float(hist["Close"].iloc[-2])
+        chg_etf = (price_etf-prev_etf)/prev_etf if not np.isnan(price_etf) and not np.isnan(prev_etf) and prev_etf>0 else np.nan
+        chg_c_etf = "#10b981" if (isinstance(chg_etf,float) and not np.isnan(chg_etf) and chg_etf>=0) else "#ef4444"
+
+        e1,e2,e3,e4,e5,e6 = st.columns(6)
+        for col,(lbl,val) in zip([e1,e2,e3,e4,e5,e6],[
+            ("Price",       f"${price_etf:.2f}" if not np.isnan(price_etf) else "N/A"),
+            ("Day Chg",     f'<span style="color:{chg_c_etf}">{pct(chg_etf)}</span>'),
+            ("52W High",    f"${sg(info,'fiftyTwoWeekHigh',np.nan):.2f}" if not np.isnan(sg(info,'fiftyTwoWeekHigh',np.nan)) else "N/A"),
+            ("52W Low",     f"${sg(info,'fiftyTwoWeekLow',np.nan):.2f}"  if not np.isnan(sg(info,'fiftyTwoWeekLow',np.nan))  else "N/A"),
+            ("Expense Ratio",pct(sg(info,'annualReportExpenseRatio',np.nan))),
+            ("AUM",         fmt(sg(info,'totalAssets',np.nan),pre="$")),
+        ]):
+            with col: st.markdown(mc(lbl,val), unsafe_allow_html=True)
+
+        st.markdown("---")
+        col_p, col_n = st.columns([1,1])
+        with col_p:
+            if not hist.empty:
+                st.plotly_chart(price_chart(hist, ticker), use_container_width=True, config={"displayModeBar":False})
+        with col_n:
+            st.markdown('<div class="section-header">📰 Latest News</div>', unsafe_allow_html=True)
+            sorted_news = sorted([n for n in news if n.get("providerPublishTime")],
+                                  key=lambda x: x.get("providerPublishTime",0), reverse=True)[:5]
+            for item in (sorted_news or news[:5]):
+                try:
+                    title=item.get("title",""); pub=item.get("publisher",""); link=item.get("link","#")
+                    ts=item.get("providerPublishTime",None)
+                    date=datetime.fromtimestamp(ts).strftime("%b %d, %Y") if ts else "—"
+                    st.markdown(f'<div class="news-card"><a href="{link}" target="_blank" style="text-decoration:none;"><div class="news-title">{title}</div></a><div class="news-meta">📰 {pub} · {date}</div></div>', unsafe_allow_html=True)
+                except: continue
+
+        st.info("⚠️ ETF detected — the full scoring model (Quality, Valuation, 7 Powers) is designed for individual stocks and does not apply to ETFs. Showing price chart and news only.")
+        return
+
+    res = score(info, hist, fin, bal, cf)
     rl   = risk_level(res["det"])
     det  = res["det"]
     confirmed = res["confirmed"]
@@ -698,7 +829,7 @@ def main():
     with c1:
         st.markdown(f'<div class="signal-{signal.replace(" ","_")}">{signal}</div>', unsafe_allow_html=True)
         st.markdown("")
-        st.markdown(f'<div class="score-card"><div class="score-giant" style="color:{sig_color};">{res["total"]}</div><div class="score-label">Score / 100</div></div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="score-card"><div class="score-giant" style="color:{sig_color};">{final_total}</div><div class="score-label">Score / 100</div></div>', unsafe_allow_html=True)
         st.markdown("")
         st.markdown(f'<div class="metric-card" style="text-align:center;"><div class="metric-label">Risk Level</div><div class="metric-value risk-{rl}" style="font-size:1.3rem;">{rl}</div></div>', unsafe_allow_html=True)
         stage_badge_color = "#f59e0b" if det.get("stage")=="growth" else "#64748b"
@@ -706,7 +837,7 @@ def main():
         st.markdown(f'<div class="metric-card" style="text-align:center;"><div class="metric-label">Company Stage</div><div class="metric-value" style="font-size:0.9rem;color:{stage_badge_color};">{stage_label}</div></div>', unsafe_allow_html=True)
 
     with c2:
-        st.plotly_chart(gauge_chart(res["total"]), use_container_width=True, config={"displayModeBar":False})
+        st.plotly_chart(gauge_chart(final_total), use_container_width=True, config={"displayModeBar":False})
 
     with c3:
         name     = sg(info,"longName",ticker)
@@ -741,27 +872,27 @@ def main():
     # ── ROW 2: Score Breakdown + Price Chart ─────────────────────────────────
     cl, cr = st.columns([1,2])
     with cl:
-        st.plotly_chart(breakdown_chart(res), use_container_width=True, config={"displayModeBar":False})
+        st.plotly_chart(breakdown_chart(res, ai_pw_score), use_container_width=True, config={"displayModeBar":False})
         if det.get("stage") == "growth":
-            st.markdown(ic("🚀 <b>Growth Stage Mode</b> — Scoring adapted: CRP replaced by Gross Margin, FCF Quality rewards positive FCF not FCF/NI ratio, Valuation uses P/S + Rule of 40 instead of P/E + PEG. High ATR/Beta thresholds relaxed.", "#f59e0b"), unsafe_allow_html=True)
+            st.markdown(ic("🚀 <b>Growth Stage Mode</b> — CRP replaced by Gross Margin, Valuation uses P/S + Rule of 40.", "#f59e0b"), unsafe_allow_html=True)
         st.markdown('<div class="section-header">Module Drill-Down</div>', unsafe_allow_html=True)
         modules=[
-            ("Quality / 29",      res["q"],           29),
-            ("  ↳ CRP",           res["sc"]["crp"],   10),
-            ("  ↳ OM Trend",      res["sc"]["om_trend"],10),
-            ("  ↳ FCF Quality",   res["sc"]["fcf_q"],  9),
-            ("Expectations / 14", res["e"],           14),
-            ("  ↳ Rev CAGR",      res["sc"]["rc"],     7),
-            ("  ↳ EPS CAGR",      res["sc"]["ec"],     7),
-            ("Valuation / 14",    res["v"],           14),
-            ("  ↳ FCF Yield",     res["sc"]["fy"],     5),
-            ("  ↳ P/E",           res["sc"]["pe"],     5),
-            ("  ↳ PEG",           res["sc"]["pg"],     4),
-            ("Technicals / 14",   res["tech"],        14),
-            ("  ↳ Stage 2",       res["sc"]["st2"],    6),
-            ("  ↳ RSI Zone",      res["sc"]["rsi"],    5),
-            ("  ↳ Volume",        res["sc"]["vol"],    3),
-            ("7 Powers / 29",     res["pw"],          29),
+            ("Quality / 25",      res["q"],              25),
+            ("  ↳ CRP / GM",      res["sc"]["crp"],      10),
+            ("  ↳ OM Trend",      res["sc"]["om_trend"], 10),
+            ("  ↳ FCF Quality",   res["sc"]["fcf_q"],     9),
+            ("Expectations / 20", res["e"],              20),
+            ("  ↳ Rev CAGR",      res["sc"]["rc"],        7),
+            ("  ↳ EPS CAGR",      res["sc"]["ec"],        7),
+            ("Valuation / 20",    res["v"],              20),
+            ("  ↳ FCF Yield",     res["sc"]["fy"],        5),
+            ("  ↳ P/E or P/S",    res["sc"]["pe"],        5),
+            ("  ↳ PEG / EV-Rev",  res["sc"]["pg"],        4),
+            ("Technicals / 15",   res["tech"],           15),
+            ("  ↳ Stage 2",       res["sc"]["st2"],       6),
+            ("  ↳ RSI Zone",      res["sc"]["rsi"],       5),
+            ("  ↳ Volume",        res["sc"]["vol"],       3),
+            ("7 Powers / 20",     ai_pw_score,           20),
         ]
         rows=[{"Module":l,"Score":f"{v:.1f}/{m}","▓":"█"*int((v/m)*10)+"░"*(10-int((v/m)*10))} for l,v,m in modules]
         st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True,
@@ -795,10 +926,14 @@ def main():
     if powers_ai:
         ai_confirmed = [p for p, v in powers_ai.items() if v.get("verdict","NO").startswith("YES")]
         ai_partial   = [p for p, v in powers_ai.items() if v.get("verdict","NO").startswith("PARTIAL")]
-        # Score: YES = full weight, PARTIAL = half weight
-        ai_pw_score  = min(29, (len(ai_confirmed) + len(ai_partial)*0.5) * (29/7))
+        # Score: YES = full weight, PARTIAL = half weight. Max = 20 pts
+        ai_pw_score  = round(min(20, (len(ai_confirmed) + len(ai_partial)*0.5) * (20/7)), 1)
     else:
-        ai_confirmed = []; ai_partial = []; ai_pw_score = res["pw"]
+        ai_confirmed = []; ai_partial = []; ai_pw_score = 0
+
+    # Add AI powers to total score (base was max 80, powers adds up to 20 = 100 total)
+    final_total = round(min(100, res["total"] + ai_pw_score), 1)
+    signal, sig_color = get_signal_from_score(final_total, hist)
 
     # Update the score display with AI result
     cp, pp = st.columns([1, 2])
@@ -810,7 +945,7 @@ def main():
         st.markdown(f"""
         <div class="metric-card" style="text-align:center;">
             <div class="metric-label">AI Powers Score</div>
-            <div class="metric-value" style="color:#3b82f6;font-size:2rem;">{ai_pw_score:.1f} / 29</div>
+            <div class="metric-value" style="color:#3b82f6;font-size:2rem;">{ai_pw_score:.1f} / 20</div>
             <div class="metric-sub">✅ {confirmed_count} confirmed &nbsp;·&nbsp; ⚡ {partial_count} partial</div>
         </div>
         """, unsafe_allow_html=True)
@@ -984,22 +1119,62 @@ def main():
 
     st.markdown("---")
 
-    # ── ROW 6: News ──────────────────────────────────────────────────────────
-    st.markdown('<div class="section-header">📰 Latest News</div>', unsafe_allow_html=True)
+    # ── ROW 6: News + AI Sentiment ───────────────────────────────────────────
+    st.markdown('<div class="section-header">📰 Latest News + AI Sentiment</div>', unsafe_allow_html=True)
+
+    sorted_news = []
     if news:
-        n1, n2 = st.columns(2)
-        for i, item in enumerate(news[:8]):
+        sorted_news = sorted([n for n in news if n.get("providerPublishTime")],
+                             key=lambda x: x.get("providerPublishTime",0), reverse=True)[:5]
+        if not sorted_news: sorted_news = news[:5]
+
+    if sorted_news:
+        with st.spinner("🤖 Analyzing news sentiment..."):
+            sentiments = ai_news_sentiment(ticker, name, sorted_news)
+
+        sent_map = {}
+        if sentiments:
+            for item in sentiments:
+                key = item.get("headline","")[:40]
+                sent_map[key] = item
+
+        for i, item in enumerate(sorted_news):
             try:
                 title = item.get("title","No title")
                 pub   = item.get("publisher","Unknown")
                 link  = item.get("link","#")
                 ts    = item.get("providerPublishTime",None)
-                date  = datetime.fromtimestamp(ts).strftime("%b %d, %Y  %H:%M") if ts else "—"
-                html  = f'<div class="news-card"><a href="{link}" target="_blank" style="text-decoration:none;"><div class="news-title">{title}</div></a><div class="news-meta">📰 {pub} &nbsp;·&nbsp; 🕐 {date}</div></div>'
-                (n1 if i%2==0 else n2).markdown(html, unsafe_allow_html=True)
+                date  = datetime.fromtimestamp(ts).strftime("%b %d, %Y") if ts else "—"
+
+                # Match sentiment
+                sent_data = None
+                for key, val in sent_map.items():
+                    if key.lower() in title.lower() or title.lower()[:40] in key.lower():
+                        sent_data = val
+                        break
+                if not sent_data and sentiments and i < len(sentiments):
+                    sent_data = sentiments[i]
+
+                sent_label = sent_data.get("sentiment","NEUTRAL") if sent_data else "NEUTRAL"
+                sent_impact = sent_data.get("impact","") if sent_data else ""
+                sent_color = "#10b981" if sent_label=="BULLISH" else "#ef4444" if sent_label=="BEARISH" else "#f59e0b"
+                sent_icon  = "🟢" if sent_label=="BULLISH" else "🔴" if sent_label=="BEARISH" else "🟡"
+
+                st.markdown(f"""
+                <div class="news-card">
+                    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;">
+                        <a href="{link}" target="_blank" style="text-decoration:none;flex:1;">
+                            <div class="news-title">{title}</div>
+                        </a>
+                        <span style="font-size:0.72rem;font-weight:700;color:{sent_color};white-space:nowrap;padding:2px 8px;background:rgba(0,0,0,0.3);border-radius:8px;border:1px solid {sent_color};">{sent_icon} {sent_label}</span>
+                    </div>
+                    <div class="news-meta">📰 {pub} &nbsp;·&nbsp; 🕐 {date}</div>
+                    {"<div style='font-size:0.78rem;color:#64748b;margin-top:4px;'>💡 " + sent_impact + "</div>" if sent_impact else ""}
+                </div>
+                """, unsafe_allow_html=True)
             except: continue
     else:
-        st.info("No recent news available.")
+        st.info("No recent news available for this ticker.")
 
     st.markdown("---")
 
@@ -1062,7 +1237,7 @@ def main():
             rev_g = sg(info,"revenueGrowth",np.nan)
             if not np.isnan(ps_v) and not np.isnan(rev_g) and ps_v>20 and rev_g<0.20:
                 bear.append(f"High P/S {ps_v:.1f}x with only {pct(rev_g)} revenue growth — valuation requires acceleration")
-        if res["total"]<50: bear.append(f"Score {res['total']}/100 below 50 — AVOID threshold")
+        if final_total<50: bear.append(f"Score {final_total}/100 below 50 — AVOID threshold")
         if not ai_confirmed: bear.append("No Helmer Powers confirmed by AI — moat not established")
         if not bear: bear.append("No critical bear flags at current levels.")
         for pt in bear: st.markdown(ic(f"⚠️ {pt}","#ef4444"), unsafe_allow_html=True)
@@ -1075,7 +1250,7 @@ def main():
     cols5 = st.columns(5)
     for col,(lbl,val,color) in zip(cols5,[
         ("Signal",        signal,                     sig_color),
-        ("Score / 100",   str(res["total"]),          sig_color),
+        ("Score / 100",   str(final_total),          sig_color),
         ("Risk Level",    rl,                         "#34d399" if rl=="LOW" else "#fbbf24" if rl=="MEDIUM" else "#f87171"),
         ("AI Powers",     f"{len(ai_confirmed)}/7 confirmed", "#3b82f6"),
         ("Analyst Target",f"${target_p:.2f}" if not np.isnan(target_p) else "N/A","#94a3b8"),
@@ -1088,6 +1263,37 @@ def main():
            "NEUTRAL":"Score 50–65. Monitor for improvement.",
            "AVOID":"Score<50. Do not enter."}
     st.markdown(ic(logic.get(signal,""),sig_color,"Signal Rationale"), unsafe_allow_html=True)
+
+    st.markdown("---")
+
+    # ── TOP 5 STOCKS OF THE DAY ──────────────────────────────────────────────
+    st.markdown('<div class="section-header">🏅 Top 5 Stocks Today — Ranked by War Room Score</div>', unsafe_allow_html=True)
+    st.markdown('<div style="font-size:0.78rem;color:#64748b;margin-bottom:10px;">Screened from a quality watchlist · Scored by our 100-pt model · Updates every hour</div>', unsafe_allow_html=True)
+
+    with st.spinner("Scoring top stocks..."):
+        top5 = get_top5_stocks()
+
+    if top5:
+        cols_top = st.columns(5)
+        for col, stock in zip(cols_top, top5):
+            sig_c = {"STRONG BUY":"#10b981","BUY":"#3b82f6","NEUTRAL":"#f59e0b","AVOID":"#ef4444"}.get(stock["signal"],"#94a3b8")
+            chg_c = "#10b981" if not np.isnan(stock["chg"]) and stock["chg"]>=0 else "#ef4444"
+            chg_str = f"{stock['chg']*100:+.1f}%" if not np.isnan(stock["chg"]) else "N/A"
+            price_str = f"${stock['price']:.2f}" if not np.isnan(stock["price"]) else "N/A"
+            with col:
+                st.markdown(f"""
+                <div style="background:#151c30;border:1px solid {sig_c};border-radius:10px;padding:14px;text-align:center;">
+                    <div style="font-family:'JetBrains Mono',monospace;font-size:1.2rem;font-weight:700;color:#f1f5f9;">{stock['ticker']}</div>
+                    <div style="font-size:0.7rem;color:#64748b;margin:2px 0 6px;">{stock['name'][:18]}</div>
+                    <div style="font-family:'JetBrains Mono',monospace;font-size:2rem;font-weight:700;color:{sig_c};">{stock['score']:.0f}</div>
+                    <div style="font-size:0.65rem;color:#475569;">Score / 100</div>
+                    <div style="margin-top:6px;font-size:0.82rem;color:#e2e8f0;">{price_str}</div>
+                    <div style="font-size:0.78rem;color:{chg_c};">{chg_str}</div>
+                    <div style="margin-top:6px;font-size:0.68rem;font-weight:700;color:{sig_c};background:rgba(0,0,0,0.3);padding:2px 6px;border-radius:6px;">{stock['signal']}</div>
+                </div>
+                """, unsafe_allow_html=True)
+    else:
+        st.info("Unable to load top stocks at this time.")
 
     st.markdown('<div style="text-align:center;color:#334155;font-size:0.7rem;margin-top:20px;padding-top:10px;border-top:1px solid #1e2a45;">War Room Terminal · For educational purposes only — Not financial advice</div>', unsafe_allow_html=True)
 
