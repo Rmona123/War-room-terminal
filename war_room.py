@@ -580,39 +580,18 @@ def main():
             port_size = st.number_input("Portfolio Size ($)", min_value=0, value=100000, step=1000)
             entry_in  = st.number_input("Entry Price ($) — 0 = use last close", min_value=0.0, value=0.0, step=0.01)
 
-        st.markdown('<div class="section-header">⚡ 7 Powers Analysis · Required</div>', unsafe_allow_html=True)
-        st.markdown('<div style="font-size:0.73rem;color:#64748b;margin-bottom:8px;">Write your justification for each applicable power (min 1 sentence). Leave blank if the power does not apply. Score = 0 for blank entries.</div>', unsafe_allow_html=True)
-        powers_analysis = {}
-        for p in ALL_POWERS:
-            with st.expander(p, expanded=False):
-                st.markdown(f'<div style="font-size:0.71rem;color:#64748b;font-style:italic;margin-bottom:6px;">{POWER_GUIDE[p]}</div>', unsafe_allow_html=True)
-                txt = st.text_area("", placeholder="Write justification or leave blank...",
-                                   height=75, key=f"pw_{p}", label_visibility="collapsed")
-                powers_analysis[p] = txt
-
         run_btn = st.button("⚡ Run War Room Analysis")
 
     if not run_btn:
         st.markdown("""<div style="text-align:center;padding:80px 20px;">
             <div style="font-size:4rem;margin-bottom:16px;">⚔️</div>
-            <div style="font-size:1.3rem;color:#64748b;font-weight:600;">Enter a ticker · Analyze 7 Powers · Click Run</div>
+            <div style="font-size:1.3rem;color:#64748b;font-weight:600;">Enter a ticker and click Run</div>
             <div style="font-size:0.88rem;margin-top:10px;color:#334155;">Quality · Expectations · Valuation · Technicals · 7 Powers</div>
         </div>""", unsafe_allow_html=True)
         return
 
-    # ── HARD BLOCK: 7 Powers must have at least 1 justified ─────────────────
-    confirmed_check = [p for p,t in powers_analysis.items() if t and len(t.strip())>10]
-    if not confirmed_check:
-        st.error("⚠️ **7 Powers Analysis is required.** Expand the power sections in the sidebar and write your justification for at least one applicable power before running the analysis. Leave powers blank only if they genuinely do not apply.")
-        st.markdown("""
-        <div style="background:#1a0f05;border:1px solid #f59e0b;border-radius:10px;padding:16px 20px;margin-top:12px;">
-            <div style="color:#fcd34d;font-weight:600;margin-bottom:8px;">Why this matters</div>
-            <div style="color:#94a3b8;font-size:0.85rem;line-height:1.6;">
-            The 7 Powers score is 29/100 pts — the single largest module. Without analyst-verified powers, the score is incomplete and the signal is unreliable. A company with no identified moat should score 0 here by design, but you must actively confirm that before proceeding.
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-        return
+    # 7 Powers scored on the dashboard — no user input needed, starts at 0
+    powers_analysis = {p: "" for p in ALL_POWERS}
 
     with st.spinner(f"Loading {ticker}..."):
         try:
@@ -733,25 +712,33 @@ def main():
 
     st.markdown("---")
 
-    # ── ROW 3: 7 Powers Deep Analysis ────────────────────────────────────────
-    st.markdown('<div class="section-header">⚡ 7 Powers Analysis — Helmer Framework</div>', unsafe_allow_html=True)
-    cp, pp = st.columns([1,2])
+    # ── ROW 3: 7 Powers Framework Display ────────────────────────────────────
+    st.markdown('<div class="section-header">⚡ 7 Powers Analysis — Helmer Framework (Score: 0/29 — fill in below to score)</div>', unsafe_allow_html=True)
+    st.markdown(f'<div style="font-size:0.8rem;color:#64748b;margin-bottom:12px;">Use this section as your qualitative research checklist for <b style="color:#e2e8f0;">{name}</b>. For each power that applies, the scoring is built into the 100-pt model above. A company with no powers scores 0/29 here — that is valid and informative.</div>', unsafe_allow_html=True)
+
+    cp, pp = st.columns([1, 2])
 
     with cp:
         st.plotly_chart(radar_chart(confirmed), use_container_width=True, config={"displayModeBar":False})
-        st.markdown(f'<div class="metric-card" style="text-align:center;"><div class="metric-label">Powers Confirmed</div><div class="metric-value" style="color:#3b82f6;font-size:2rem;">{len(confirmed)} / 7</div><div class="metric-sub">{res["pw"]:.1f} / 29 pts — analyst-verified only</div></div>', unsafe_allow_html=True)
-        if not confirmed:
-            st.markdown(ic("⚠️ No powers confirmed yet. Expand each power in the sidebar and write your justification.", "#f59e0b"), unsafe_allow_html=True)
+        st.markdown(f'<div class="metric-card" style="text-align:center;"><div class="metric-label">Powers Score</div><div class="metric-value" style="color:#3b82f6;font-size:2rem;">{res["pw"]:.1f} / 29</div><div class="metric-sub">Based on analyst notes below</div></div>', unsafe_allow_html=True)
 
     with pp:
+        st.markdown('<div style="font-size:0.75rem;color:#64748b;margin-bottom:8px;">For each power, write your analysis in the box. Min 1 sentence to count toward the score. Leave blank if not applicable — score stays 0 for that power.</div>', unsafe_allow_html=True)
+        new_powers = {}
         for p in ALL_POWERS:
-            txt = powers_analysis.get(p,"").strip()
-            active = p in confirmed
-            cls = "power-card active" if active else "power-card"
-            icon = "✅" if active else "⬜"
-            vc = "power-verdict filled" if txt else "power-verdict"
-            body = txt if txt else f"<em style='color:#475569'>{POWER_GUIDE[p]}</em>"
-            st.markdown(f'<div class="{cls}"><div class="power-name">{icon} {p}</div><div class="{vc}">{body}</div></div>', unsafe_allow_html=True)
+            prev_txt = st.session_state.get(f"live_pw_{p}", "")
+            with st.expander(f"{'✅' if p in confirmed else '⬜'} {p}", expanded=False):
+                st.markdown(f'<div style="font-size:0.71rem;color:#64748b;font-style:italic;margin-bottom:6px;">{POWER_GUIDE[p]}</div>', unsafe_allow_html=True)
+                txt = st.text_area("", value=prev_txt,
+                                   placeholder="Write your analysis here, or leave blank if this power does not apply...",
+                                   height=70, key=f"live_pw_{p}", label_visibility="collapsed")
+                new_powers[p] = txt
+
+        # Recalculate powers score live if anything was written
+        live_confirmed = [p for p, t in new_powers.items() if t and len(t.strip()) > 10]
+        if live_confirmed != confirmed:
+            live_pw_s = min(29, len(live_confirmed) * (29/7))
+            st.markdown(f'<div class="insight-card" style="border-left-color:#10b981;margin-top:8px;"><div class="insight-text">✅ <b>{len(live_confirmed)} power(s) justified</b> → Powers score updates to <b>{live_pw_s:.1f}/29</b>. Re-run analysis to apply to total score.</div></div>', unsafe_allow_html=True)
 
     st.markdown("---")
 
