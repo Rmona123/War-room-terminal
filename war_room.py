@@ -125,8 +125,12 @@ def fetch_data(ticker):
 @st.cache_data(ttl=600, show_spinner=False)
 def ai_analyze_7_powers(ticker, company_name, sector, industry, description,
                          gross_margin, op_margin, rev_cagr, market_cap, stage):
-    """Call Claude API to automatically analyze which of Helmer's 7 Powers apply."""
+    """Call Groq API (free) to automatically analyze which of Helmer's 7 Powers apply."""
     try:
+        api_key = st.secrets.get("GROQ_API_KEY", "")
+        if not api_key:
+            return None
+
         prompt = f"""You are an expert equity analyst trained in Hamilton Helmer's 7 Powers framework.
 
 Analyze this company and determine which of the 7 Powers apply. Be specific, concise, and honest — if a power does NOT apply, say so clearly.
@@ -157,20 +161,21 @@ Respond ONLY in this exact JSON format, no markdown, no extra text:
 }}"""
 
         response = requests.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={"Content-Type": "application/json"},
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}"
+            },
             json={
-                "model": "claude-sonnet-4-20250514",
+                "model": "llama-3.3-70b-versatile",
                 "max_tokens": 1000,
+                "temperature": 0.3,
                 "messages": [{"role": "user", "content": prompt}]
             },
             timeout=30
         )
         data = response.json()
-        raw = ""
-        for block in data.get("content", []):
-            if block.get("type") == "text":
-                raw += block.get("text", "")
+        raw = data["choices"][0]["message"]["content"]
         raw = raw.strip().replace("```json","").replace("```","").strip()
         return json.loads(raw)
     except Exception:
