@@ -823,6 +823,32 @@ def main():
                     pos_size   = shares_qty*entry
         except: pass
 
+    # ── Run AI 7 Powers BEFORE rendering so signal/score are ready ───────────
+    name     = sg(info,"longName",ticker)
+    sector   = sg(info,"sector","—")
+    industry = sg(info,"industry","—")
+
+    with st.spinner("🤖 Analyzing 7 Powers with AI..."):
+        powers_ai = ai_analyze_7_powers(
+            ticker=ticker, company_name=name, sector=sector, industry=industry,
+            description=sg(info,"longBusinessSummary",""),
+            gross_margin=pct(sg(info,"grossMargins",np.nan)),
+            op_margin=pct(sg(info,"operatingMargins",np.nan)),
+            rev_cagr=pct(det.get("rc",np.nan)),
+            market_cap=fmt(sg(info,"marketCap",np.nan),pre="$"),
+            stage=det.get("stage","mature")
+        )
+
+    if powers_ai:
+        ai_confirmed = [p for p,v in powers_ai.items() if v.get("verdict","NO").startswith("YES")]
+        ai_partial   = [p for p,v in powers_ai.items() if v.get("verdict","NO").startswith("PARTIAL")]
+        ai_pw_score  = round(min(20,(len(ai_confirmed)+len(ai_partial)*0.5)*(20/7)),1)
+    else:
+        ai_confirmed = []; ai_partial = []; ai_pw_score = 0
+
+    final_total = round(min(100, res["total"] + ai_pw_score), 1)
+    signal, sig_color = get_signal_from_score(final_total, hist)
+
     # ── ROW 1: Signal · Score · Header ──────────────────────────────────────
     c1,c2,c3 = st.columns([1.2,1.4,2.4])
 
@@ -840,9 +866,6 @@ def main():
         st.plotly_chart(gauge_chart(final_total), use_container_width=True, config={"displayModeBar":False})
 
     with c3:
-        name     = sg(info,"longName",ticker)
-        sector   = sg(info,"sector","—")
-        industry = sg(info,"industry","—")
         mktcap   = sg(info,"marketCap",np.nan)
         beta_v   = det.get("beta",np.nan)
         w52h     = sg(info,"fiftyTwoWeekHigh",np.nan)
@@ -907,33 +930,6 @@ def main():
 
     # ── ROW 3: AI-Powered 7 Powers Analysis ──────────────────────────────────
     st.markdown('<div class="section-header">⚡ 7 Powers Analysis — Auto-Analyzed by AI (Helmer Framework)</div>', unsafe_allow_html=True)
-
-    with st.spinner("🤖 Analyzing 7 Powers with AI..."):
-        powers_ai = ai_analyze_7_powers(
-            ticker       = ticker,
-            company_name = name,
-            sector       = sector,
-            industry     = industry,
-            description  = sg(info, "longBusinessSummary", ""),
-            gross_margin = pct(sg(info,"grossMargins",np.nan)),
-            op_margin    = pct(sg(info,"operatingMargins",np.nan)),
-            rev_cagr     = pct(det.get("rc", np.nan)),
-            market_cap   = fmt(sg(info,"marketCap",np.nan), pre="$"),
-            stage        = det.get("stage","mature")
-        )
-
-    # Determine confirmed powers from AI verdict
-    if powers_ai:
-        ai_confirmed = [p for p, v in powers_ai.items() if v.get("verdict","NO").startswith("YES")]
-        ai_partial   = [p for p, v in powers_ai.items() if v.get("verdict","NO").startswith("PARTIAL")]
-        # Score: YES = full weight, PARTIAL = half weight. Max = 20 pts
-        ai_pw_score  = round(min(20, (len(ai_confirmed) + len(ai_partial)*0.5) * (20/7)), 1)
-    else:
-        ai_confirmed = []; ai_partial = []; ai_pw_score = 0
-
-    # Add AI powers to total score (base was max 80, powers adds up to 20 = 100 total)
-    final_total = round(min(100, res["total"] + ai_pw_score), 1)
-    signal, sig_color = get_signal_from_score(final_total, hist)
 
     # Update the score display with AI result
     cp, pp = st.columns([1, 2])
