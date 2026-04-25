@@ -221,9 +221,12 @@ Respond ONLY in JSON array format, no markdown:
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_top5_stocks():
-    """Score a watchlist of quality stocks and return top 5 by our model."""
-    watchlist = ["AAPL","MSFT","NVDA","GOOGL","META","AMZN","BRK-B","LLY","JPM",
-                 "V","MA","COST","UNH","AVGO","TSLA","AMD","CRM","NOW","ADBE","INTU"]
+    """Score a curated watchlist and return top 5 — includes AI powers estimate."""
+    # Curated list of quality compounders across sectors
+    watchlist = [
+        "AAPL","MSFT","NVDA","GOOGL","META","AMZN","LLY","V","MA",
+        "COST","AVGO","NOW","ADBE","INTU","UNH","JPM","BRK-B","TSLA","AMD","CRM"
+    ]
     results = []
     for t in watchlist:
         try:
@@ -234,18 +237,33 @@ def get_top5_stocks():
             bal  = tk.balance_sheet
             cf   = tk.cashflow
             res  = score(info, hist, fin, bal, cf)
+
+            # Estimate AI powers from sector/margin heuristics (no API call in batch)
+            gm = sg(info,"grossMargins",np.nan) or 0
+            sector = (sg(info,"sector","") or "").lower()
+            industry = (sg(info,"industry","") or "").lower()
+            estimated_powers = 0
+            if gm > 0.50: estimated_powers += 1          # likely scale/branding
+            if "software" in industry or "internet" in sector: estimated_powers += 2
+            if "semiconductor" in industry: estimated_powers += 1
+            if sg(info,"marketCap",0) > 100e9: estimated_powers += 1  # scale
+            if gm > 0.70: estimated_powers += 1           # strong branding/switching costs
+            estimated_pw_score = min(20, estimated_powers * (20/7))
+
+            total = round(min(100, res["total"] + estimated_pw_score), 1)
             price_v = get_price(info, hist)
-            day_chg = np.nan
             prev = sg(info,"previousClose",np.nan)
-            if not np.isnan(prev) and not np.isnan(price_v) and prev>0:
-                day_chg = (price_v-prev)/prev
+            day_chg = (price_v-prev)/prev if not np.isnan(price_v) and not np.isnan(prev) and prev>0 else np.nan
+
             results.append({
                 "ticker":  t,
                 "name":    sg(info,"shortName", t),
-                "score":   res["total"],
+                "score":   total,
                 "price":   price_v,
                 "chg":     day_chg,
-                "signal":  get_signal_from_score(res["total"], hist)[0],
+                "signal":  get_signal_from_score(total, hist)[0],
+                "sector":  sg(info,"sector","—"),
+                "gm":      gm,
             })
         except Exception:
             continue
@@ -622,28 +640,124 @@ CL = dict(paper_bgcolor="rgba(0,0,0,0)",plot_bgcolor="rgba(10,14,26,0.8)",
 
 def price_chart(hist, ticker):
     if hist.empty: return go.Figure()
-    fig=make_subplots(rows=3,cols=1,shared_xaxes=True,row_heights=[0.55,0.25,0.20],vertical_spacing=0.03)
-    fig.add_trace(go.Candlestick(x=hist.index,open=hist["Open"],high=hist["High"],low=hist["Low"],close=hist["Close"],
-        name="Price",increasing_line_color="#10b981",decreasing_line_color="#ef4444",
-        increasing_fillcolor="#10b981",decreasing_fillcolor="#ef4444"),row=1,col=1)
-    for sma,col,nm in [("SMA50","#f59e0b","50D"),("SMA200","#8b5cf6","200D")]:
-        if sma in hist.columns:
-            fig.add_trace(go.Scatter(x=hist.index,y=hist[sma],name=nm,
-                line=dict(color=col,width=1.5,dash="dot"),opacity=0.8),row=1,col=1)
-    colors=["#10b981" if c>=o else "#ef4444" for c,o in zip(hist["Close"],hist["Open"])]
-    fig.add_trace(go.Bar(x=hist.index,y=hist["Volume"],name="Vol",marker_color=colors,opacity=0.5),row=2,col=1)
-    if "Vol20" in hist.columns:
-        fig.add_trace(go.Scatter(x=hist.index,y=hist["Vol20"],name="Vol20",
-            line=dict(color="#f59e0b",width=1),opacity=0.7),row=2,col=1)
+
+    fig = make_subplots(
+        rows=3, cols=1, shared_xaxes=True,
+        row_heights=[0.60, 0.20, 0.20],
+        vertical_spacing=0.02,
+        subplot_titles=("", "Volume", "RSI")
+    )
+
+    # ── Candlestick with wider candles ──
+    fig.add_trace(go.Candlestick(
+        x=hist.index, open=hist["Open"], high=hist["High"],
+        low=hist["Low"], close=hist["Close"],
+        name="Price",
+        increasing=dict(line=dict(color="#00d4aa", width=1), fillcolor="#00d4aa"),
+        decreasing=dict(line=dict(color="#ff4757", width=1), fillcolor="#ff4757"),
+        whiskerwidth=0.5,
+    ), row=1, col=1)
+
+    # ── SMAs with gradient style ──
+    if "SMA50" in hist.columns:
+        fig.add_trace(go.Scatter(
+            x=hist.index, y=hist["SMA50"], name="SMA 50",
+            line=dict(color="#ffa502", width=2),
+            opacity=0.9, hovertemplate="%{y:.2f}"
+        ), row=1, col=1)
+
+    if "SMA200" in hist.columns:
+        fig.add_trace(go.Scatter(
+            x=hist.index, y=hist["SMA200"], name="SMA 200",
+            line=dict(color="#a855f7", width=2),
+            opacity=0.9, hovertemplate="%{y:.2f}"
+        ), row=1, col=1)
+
+    # ── Volume bars colored by up/down ──
+    if "Volume" in hist.columns:
+        up_mask   = hist["Close"] >= hist["Open"]
+        down_mask = ~up_mask
+        fig.add_trace(go.Bar(
+            x=hist.index[up_mask], y=hist["Volume"][up_mask],
+            name="Vol Up", marker_color="rgba(0,212,170,0.4)",
+            showlegend=False
+        ), row=2, col=1)
+        fig.add_trace(go.Bar(
+            x=hist.index[down_mask], y=hist["Volume"][down_mask],
+            name="Vol Down", marker_color="rgba(255,71,87,0.4)",
+            showlegend=False
+        ), row=2, col=1)
+        if "Vol20" in hist.columns:
+            fig.add_trace(go.Scatter(
+                x=hist.index, y=hist["Vol20"], name="Vol MA20",
+                line=dict(color="#ffa502", width=1.2, dash="dot"),
+                opacity=0.7
+            ), row=2, col=1)
+
+    # ── RSI with zones ──
     if "RSI" in hist.columns:
-        fig.add_trace(go.Scatter(x=hist.index,y=hist["RSI"],name="RSI",
-            line=dict(color="#3b82f6",width=1.5)),row=3,col=1)
-        fig.add_hrect(y0=45,y1=65,row=3,col=1,fillcolor="rgba(59,130,246,0.08)",line_width=0)
-        for lv,lc in [(30,"#ef4444"),(70,"#ef4444"),(50,"#64748b")]:
-            fig.add_hline(y=lv,row=3,col=1,line=dict(color=lc,width=0.8,dash="dot"))
-    fig.update_layout(title=f"{ticker} — Price · Volume · RSI",**CL,height=510,showlegend=True,
-        legend=dict(orientation="h",yanchor="bottom",y=1.01,xanchor="right",x=1,font=dict(size=10)),
-        xaxis_rangeslider_visible=False)
+        rsi = hist["RSI"]
+        fig.add_trace(go.Scatter(
+            x=hist.index, y=rsi, name="RSI",
+            line=dict(color="#60a5fa", width=2),
+            fill=None
+        ), row=3, col=1)
+        # Color zones
+        fig.add_hrect(y0=70, y1=100, row=3, col=1,
+                      fillcolor="rgba(255,71,87,0.08)", line_width=0)
+        fig.add_hrect(y0=0,  y1=30,  row=3, col=1,
+                      fillcolor="rgba(255,71,87,0.08)", line_width=0)
+        fig.add_hrect(y0=45, y1=65,  row=3, col=1,
+                      fillcolor="rgba(0,212,170,0.06)", line_width=0)
+        for lvl, clr, lbl in [
+            (70, "rgba(255,71,87,0.6)",   "OB"),
+            (30, "rgba(255,71,87,0.6)",   "OS"),
+            (50, "rgba(100,116,139,0.4)", ""),
+        ]:
+            fig.add_hline(y=lvl, row=3, col=1,
+                          line=dict(color=clr, width=1, dash="dot"),
+                          annotation_text=lbl,
+                          annotation_position="right",
+                          annotation=dict(font=dict(size=9, color=clr)))
+
+    fig.update_layout(
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="#0d1220",
+        font=dict(color="#94a3b8", family="Inter", size=11),
+        height=560,
+        showlegend=True,
+        legend=dict(
+            orientation="h", yanchor="bottom", y=1.02,
+            xanchor="left", x=0,
+            font=dict(size=10),
+            bgcolor="rgba(0,0,0,0)",
+        ),
+        hovermode="x unified",
+        xaxis_rangeslider_visible=False,
+        margin=dict(l=60, r=30, t=30, b=30),
+    )
+    # Grid styling per row
+    for i in range(1, 4):
+        fig.update_xaxes(
+            row=i, col=1,
+            gridcolor="rgba(30,42,69,0.8)",
+            linecolor="#2d3a5e",
+            showgrid=True,
+            zeroline=False,
+        )
+        fig.update_yaxes(
+            row=i, col=1,
+            gridcolor="rgba(30,42,69,0.8)",
+            linecolor="#2d3a5e",
+            showgrid=True,
+            zeroline=False,
+        )
+    fig.update_yaxes(title_text="Price", row=1, col=1,
+                     title_font=dict(size=10), tickprefix="$")
+    fig.update_yaxes(title_text="Vol",   row=2, col=1,
+                     title_font=dict(size=10))
+    fig.update_yaxes(title_text="RSI",   row=3, col=1,
+                     title_font=dict(size=10), range=[0, 100])
     return fig
 
 def gauge_chart(s):
@@ -720,7 +834,7 @@ def main():
     st.markdown("""
     <div class="war-header">
         <h1>⚔️ War Room Research Terminal</h1>
-        <p>Equity Research · Quality(29) + Expectations(14) + Valuation(14) + Technicals(14) + 7 Powers(29) = 100 pts</p>
+        <p>Fundamental · Technical · AI-Powered 7 Powers Analysis</p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -767,10 +881,20 @@ def main():
     is_etf = quote_type in ["ETF", "MUTUALFUND"] or sg(info, "fundFamily", None) is not None
 
     if is_etf:
+        etf_website = sg(info,"website","")
+        etf_logo = ""
+        if etf_website:
+            try:
+                domain = etf_website.replace("https://","").replace("http://","").replace("www.","").split("/")[0]
+                etf_logo = f'<img src="https://logo.clearbit.com/{domain}" style="height:38px;width:38px;border-radius:6px;object-fit:contain;background:#fff;padding:3px;margin-right:10px;vertical-align:middle;" onerror="this.style.display=\'none\'">'
+            except: pass
         st.markdown(f"""
-        <div style="background:#1a1f35;border:1px solid #2d3a5e;border-radius:12px;padding:20px 24px;margin-bottom:16px;">
-            <div style="font-size:1.3rem;font-weight:700;color:#f1f5f9;">{sg(info,'longName',ticker)}</div>
-            <div style="font-size:0.8rem;color:#64748b;margin-top:4px;">ETF / Fund · {sg(info,'category','—')} · {sg(info,'fundFamily','—')}</div>
+        <div style="background:#1a1f35;border:1px solid #2d3a5e;border-radius:12px;padding:20px 24px;margin-bottom:16px;display:flex;align-items:center;">
+            {etf_logo}
+            <div>
+                <div style="font-size:1.3rem;font-weight:700;color:#f1f5f9;">{sg(info,'longName',ticker)}</div>
+                <div style="font-size:0.8rem;color:#64748b;margin-top:4px;">📊 ETF / Fund · {sg(info,'category','—')} · {sg(info,'fundFamily','—')}</div>
+            </div>
         </div>
         """, unsafe_allow_html=True)
 
@@ -885,8 +1009,27 @@ def main():
         beta_v   = det.get("beta",np.nan)
         w52h     = sg(info,"fiftyTwoWeekHigh",np.nan)
         w52l     = sg(info,"fiftyTwoWeekLow",np.nan)
-        st.markdown(f'<div style="font-size:1.45rem;font-weight:700;color:#f1f5f9;">{name}</div><div style="font-size:0.8rem;color:#64748b;">{sector} · {industry}</div>', unsafe_allow_html=True)
-        st.markdown("")
+        website  = sg(info,"website","")
+
+        # Company logo via Clearbit (free, no API key needed)
+        logo_html = ""
+        if website:
+            try:
+                domain = website.replace("https://","").replace("http://","").replace("www.","").split("/")[0]
+                logo_url = f"https://logo.clearbit.com/{domain}"
+                logo_html = f'<img src="{logo_url}" style="height:42px;width:42px;border-radius:8px;object-fit:contain;background:#fff;padding:3px;margin-right:12px;vertical-align:middle;" onerror="this.style.display=\'none\'">'
+            except: pass
+
+        st.markdown(f'''
+        <div style="display:flex;align-items:center;margin-bottom:8px;">
+            {logo_html}
+            <div>
+                <div style="font-size:1.45rem;font-weight:700;color:#f1f5f9;line-height:1.2;">{name}</div>
+                <div style="font-size:0.8rem;color:#64748b;">{ticker} · {sector} · {industry}</div>
+            </div>
+        </div>
+        ''', unsafe_allow_html=True)
+
         chg_c="#10b981" if (isinstance(day_chg,float) and not np.isnan(day_chg) and day_chg>=0) else "#ef4444"
         cols = st.columns(6)
         for col,(lbl,val) in zip(cols,[
