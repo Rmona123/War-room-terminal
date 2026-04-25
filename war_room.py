@@ -125,12 +125,11 @@ def fetch_data(ticker):
 def ai_analyze_7_powers(ticker, company_name, sector, industry, description,
                          gross_margin, op_margin, rev_cagr, market_cap, stage):
     """Call Groq API (free) to automatically analyze which of Helmer's 7 Powers apply."""
-    try:
-        api_key = st.secrets.get("GROQ_API_KEY", "")
-        if not api_key:
-            return None
+    api_key = st.secrets.get("GROQ_API_KEY", "")
+    if not api_key:
+        return None
 
-        prompt = f"""You are an expert equity analyst trained in Hamilton Helmer's 7 Powers framework.
+    prompt = f"""You are an expert equity analyst trained in Hamilton Helmer's 7 Powers framework.
 
 Analyze this company and determine which of the 7 Powers apply. Be specific, concise, and honest — if a power does NOT apply, say so clearly.
 
@@ -159,26 +158,29 @@ Respond ONLY in this exact JSON format, no markdown, no extra text:
   "Process Power": {{"verdict": "YES/PARTIAL/NO", "reasoning": "..."}}
 }}"""
 
-        response = requests.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {api_key}"
-            },
-            json={
-                "model": "llama-3.3-70b-versatile",
-                "max_tokens": 1000,
-                "temperature": 0.3,
-                "messages": [{"role": "user", "content": prompt}]
-            },
-            timeout=30
-        )
-        data = response.json()
-        raw = data["choices"][0]["message"]["content"]
-        raw = raw.strip().replace("```json","").replace("```","").strip()
-        return json.loads(raw)
-    except Exception:
-        return None
+    for attempt in range(3):
+        try:
+            response = requests.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
+                json={"model": "llama-3.3-70b-versatile", "max_tokens": 1000, "temperature": 0.3,
+                      "messages": [{"role": "user", "content": prompt}]},
+                timeout=30
+            )
+            if response.status_code != 200:
+                continue
+            raw = response.json()["choices"][0]["message"]["content"].strip()
+            if "```" in raw:
+                parts = raw.split("```")
+                raw = parts[1] if len(parts) > 1 else parts[0]
+                if raw.startswith("json"): raw = raw[4:]
+            raw = raw.strip()
+            result = json.loads(raw)
+            if all(p in result for p in ALL_POWERS):
+                return result
+        except Exception:
+            continue
+    return None
 
 
 def ai_news_sentiment(ticker, company_name, news_items):
@@ -267,11 +269,24 @@ def sg(d, k, default=None):
     except: return default
 
 def sr(df, name, idx=0, default=np.nan):
+    """Get row from financial dataframe — exact match first, then substring."""
     try:
         if df is None or df.empty: return default
-        m = [r for r in df.index if name.lower() in r.lower()]
-        if not m: return default
-        v = df.loc[m[0]].iloc[idx]
+        # Try exact match first
+        if name in df.index:
+            v = df.loc[name].iloc[idx]
+            return float(v) if not pd.isna(v) else default
+        # Try case-insensitive exact
+        for r in df.index:
+            if r.lower() == name.lower():
+                v = df.loc[r].iloc[idx]
+                return float(v) if not pd.isna(v) else default
+        # Fallback: substring (least preferred)
+        matches = [r for r in df.index if name.lower() in r.lower()]
+        # Prefer shorter match (more specific)
+        matches.sort(key=lambda x: len(x))
+        if not matches: return default
+        v = df.loc[matches[0]].iloc[idx]
         return float(v) if not pd.isna(v) else default
     except: return default
 
@@ -997,30 +1012,70 @@ def main():
     ca, cb, cc = st.columns([1.5,1.2,1.3])
 
     with ca:
-        st.markdown('<div class="section-header">Key Financial Metrics</div>', unsafe_allow_html=True)
-        gm  = sg(info,"grossMargins",np.nan)
-        om_ = sg(info,"operatingMargins",np.nan)
-        nm  = sg(info,"profitMargins",np.nan)
-        roe = sg(info,"returnOnEquity",np.nan)
-        de  = sg(info,"debtToEquity",np.nan)
+        st.markdown('<div class="section-header">Key Financial Metrics — Source: Yahoo Finance</div>', unsafe_allow_html=True)
+        gm   = sg(info,"grossMargins",np.nan)
+        om_  = sg(info,"operatingMargins",np.nan)
+        nm   = sg(info,"profitMargins",np.nan)
+        roe  = sg(info,"returnOnEquity",np.nan)
+        roa  = sg(info,"returnOnAssets",np.nan)
+        de   = sg(info,"debtToEquity",np.nan)
+        cr   = sg(info,"currentRatio",np.nan)
+        qr   = sg(info,"quickRatio",np.nan)
+        # Use Yahoo's pre-calculated FCF — much more accurate than manual calc
+        fcf_yahoo    = sg(info,"freeCashflow",np.nan)
+        opcf_yahoo   = sg(info,"operatingCashflow",np.nan)
+        rev_ttm      = sg(info,"totalRevenue",np.nan)
+        ni_ttm       = sg(info,"netIncomeToCommon",np.nan)
+        ebitda_yahoo = sg(info,"ebitda",np.nan)
+        eps_ttm      = sg(info,"trailingEps",np.nan)
+        eps_fwd      = sg(info,"forwardEps",np.nan)
+        shares       = sg(info,"sharesOutstanding",np.nan)
+
+        # FCF yield from Yahoo's FCF
+        fcf_yield_display = np.nan
+        if not np.isnan(fcf_yahoo) and not np.isnan(price) and not np.isnan(shares) and price>0 and shares>0:
+            fcf_yield_display = (fcf_yahoo / shares) / price
+
+        # FCF / NI ratio from Yahoo
+        fcf_ni_display = np.nan
+        if not np.isnan(fcf_yahoo) and not np.isnan(ni_ttm) and ni_ttm>0:
+            fcf_ni_display = fcf_yahoo / ni_ttm
+
         for lbl,val,hint in [
-            ("Capital Return Proxy (CRP)", pct(det.get("crp",np.nan)),   "Net Income/(Equity+Debt). >15%=excellent"),
-            ("FCF (Op CF − CapEx)",        fmt(det.get("fcf",np.nan),pre="$"), "Manual calculation"),
-            ("FCF / Net Income",           pct(det.get("fcf_r",np.nan)), "≥80%=high earnings quality"),
-            ("FCF Yield",                  pct(det.get("fy",np.nan)),    "vs 4.4% Treasury benchmark"),
-            ("Trailing P/E",               f"{det.get('pe',np.nan):.1f}x" if not np.isnan(det.get("pe",np.nan)) else "N/A", ""),
-            ("PEG Ratio",                  f"{det.get('pg',np.nan):.2f}" if not np.isnan(det.get("pg",np.nan)) else "N/A", "<1.0=attractive"),
-            ("Rev CAGR (5Y→3Y fallback)",  pct(det.get("rc",np.nan)),   ""),
-            ("EPS CAGR (5Y→3Y fallback)",  pct(det.get("ec",np.nan)),   ""),
-            ("Gross Margin",               pct(gm),  ""),
-            ("Operating Margin",           pct(om_), ""),
-            ("Net Margin",                 pct(nm),  ""),
-            ("Return on Equity",           pct(roe), ">15%=strong"),
-            ("Debt / Equity",              f"{de/100:.2f}" if not np.isnan(de) else "N/A", "<0.5=conservative"),
-            ("RSI (14-day)",               f"{det.get('rsi',np.nan):.1f}" if not np.isnan(det.get("rsi",np.nan)) else "N/A", "45–65=optimal"),
-            ("ATR %",                      pct(det.get("atr",np.nan)),   "<3%=LOW volatility"),
+            ("── PROFITABILITY ──",           "", ""),
+            ("Gross Margin",                  pct(gm),   "Yahoo Finance TTM"),
+            ("Operating Margin",              pct(om_),  "Yahoo Finance TTM"),
+            ("Net Profit Margin",             pct(nm),   "Yahoo Finance TTM"),
+            ("Return on Equity (ROE)",        pct(roe),  ">15% = strong"),
+            ("Return on Assets (ROA)",        pct(roa),  ">5% = decent"),
+            ("── CASH FLOW ──",               "", ""),
+            ("Free Cash Flow (Yahoo)",        fmt(fcf_yahoo,pre="$"),   "Yahoo pre-calculated FCF"),
+            ("Operating Cash Flow",           fmt(opcf_yahoo,pre="$"),  "Yahoo TTM"),
+            ("FCF Yield",                     pct(fcf_yield_display),   "vs 4.4% Treasury benchmark"),
+            ("FCF / Net Income",              pct(fcf_ni_display),      "≥80% = high earnings quality"),
+            ("── INCOME ──",                  "", ""),
+            ("Revenue (TTM)",                 fmt(rev_ttm,pre="$"),     "Yahoo TTM"),
+            ("Net Income (TTM)",              fmt(ni_ttm,pre="$"),      "Yahoo TTM"),
+            ("EBITDA",                        fmt(ebitda_yahoo,pre="$"),"Yahoo TTM"),
+            ("EPS Trailing",                  f"${eps_ttm:.2f}" if eps_ttm and not np.isnan(eps_ttm) else "N/A", ""),
+            ("EPS Forward",                   f"${eps_fwd:.2f}" if eps_fwd and not np.isnan(eps_fwd) else "N/A", ""),
+            ("── BALANCE SHEET ──",           "", ""),
+            ("Debt / Equity",                 f"{de/100:.2f}" if not np.isnan(de) else "N/A", "<0.5=conservative"),
+            ("Current Ratio",                 f"{cr:.2f}" if not np.isnan(cr) else "N/A",    ">1.5=healthy"),
+            ("Quick Ratio",                   f"{qr:.2f}" if not np.isnan(qr) else "N/A",    ">1.0=healthy"),
+            ("── SCORING INPUTS ──",          "", ""),
+            ("Capital Return Proxy (CRP)",    pct(det.get("crp",np.nan)), "Net Income/(Equity+Debt). >15%=excellent"),
+            ("Rev CAGR (5Y→3Y fallback)",     pct(det.get("rc",np.nan)), "From annual financials"),
+            ("EPS CAGR (5Y→3Y fallback)",     pct(det.get("ec",np.nan)), "From annual financials"),
+            ("── TECHNICALS ──",              "", ""),
+            ("RSI (14-day)",                  f"{det.get('rsi',np.nan):.1f}" if not np.isnan(det.get("rsi",np.nan)) else "N/A", "45–65=optimal"),
+            ("ATR %",                         pct(det.get("atr",np.nan)), "<3%=LOW volatility"),
+            ("Beta",                          f"{det.get('beta',np.nan):.2f}" if not np.isnan(det.get("beta",np.nan)) else "N/A", "vs S&P 500"),
         ]:
-            st.markdown(mc(lbl,val,hint), unsafe_allow_html=True)
+            if val == "" and hint == "":
+                st.markdown(f'<div style="font-size:0.68rem;color:#3b82f6;text-transform:uppercase;letter-spacing:1px;margin:10px 0 4px;padding-top:6px;border-top:1px solid #1e2a45;">{lbl}</div>', unsafe_allow_html=True)
+            else:
+                st.markdown(mc(lbl,val,hint), unsafe_allow_html=True)
 
     with cb:
         st.markdown('<div class="section-header">Operating Margin Trend</div>', unsafe_allow_html=True)
