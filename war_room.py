@@ -942,14 +942,14 @@ def main():
         ticker_input = st.text_input("", value="AAPL", placeholder="e.g. NVDA", label_visibility="collapsed")
         ticker = ticker_input.strip().upper()
 
-        st.markdown('<div class="section-header">Sanity Check</div>', unsafe_allow_html=True)
-        business_model = st.text_area("Explain this business model in one sentence:",
+        st.markdown('<div class="section-header">Notes (Optional)</div>', unsafe_allow_html=True)
+        business_model = st.text_area("Business model / investment thesis:",
                                        placeholder="e.g. Apple sells premium consumer electronics and earns recurring revenue through its software/services ecosystem.",
-                                       height=80)
+                                       height=68)
 
         st.markdown('<div class="section-header">Portfolio Context</div>', unsafe_allow_html=True)
         portfolio_size = st.number_input("Portfolio Size ($)", min_value=1000, value=100000, step=1000)
-        entry_price_input = st.number_input("Entry Price ($)", min_value=0.01, value=0.0, step=0.01,
+        entry_price_input = st.number_input("Entry Price ($)", min_value=0.0, value=0.0, step=0.01,
                                              help="Leave 0 to use current market price")
 
         st.markdown('<div class="section-header">7 Powers · Helmer (30 pts)</div>', unsafe_allow_html=True)
@@ -983,11 +983,6 @@ def main():
             </div>
         </div>
         """, unsafe_allow_html=True)
-        return
-
-    # ── SANITY CHECK ─────────────────────────────────────────────────────────
-    if not business_model.strip():
-        st.warning("⚠️ **Sanity Check Required:** Complete the 'Explain this business model in one sentence' field before proceeding. If you can't describe the business simply, you don't understand it well enough to invest.")
         return
 
     # ── LOAD DATA ────────────────────────────────────────────────────────────
@@ -1091,12 +1086,13 @@ def main():
                 """, unsafe_allow_html=True)
 
         # Business model thesis
-        st.markdown(f"""
-        <div class="insight-card" style="margin-top:10px;">
-            <div class="insight-label">📋 Business Model Thesis</div>
-            <div class="insight-text">"{business_model}"</div>
-        </div>
-        """, unsafe_allow_html=True)
+        if business_model.strip():
+            st.markdown(f"""
+            <div class="insight-card" style="margin-top:10px;">
+                <div class="insight-label">📋 Business Model Thesis</div>
+                <div class="insight-text">"{business_model}"</div>
+            </div>
+            """, unsafe_allow_html=True)
 
     st.markdown("---")
 
