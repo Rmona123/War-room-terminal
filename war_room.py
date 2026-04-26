@@ -323,25 +323,52 @@ def get_price(info, hist):
 def detect_stage(info, fin):
     """Detect GROWTH vs MATURE vs CYCLICAL stage."""
     try:
-        ni = sr(fin, "Net Income")
-        gm = safe_float(sg(info, "grossMargins", np.nan))
-        rg = safe_float(sg(info, "revenueGrowth", np.nan))
-        sector   = (sg(info,"sector","") or "").lower()
+        ni  = sr(fin, "Net Income")
+        gm  = safe_float(sg(info, "grossMargins",  np.nan))
+        rg  = safe_float(sg(info, "revenueGrowth", np.nan))
+        sector   = (sg(info,"sector","")   or "").lower()
         industry = (sg(info,"industry","") or "").lower()
+        desc     = (sg(info,"longBusinessSummary","") or "").lower()
+        mktcap   = safe_float(sg(info,"marketCap", np.nan)) or 0
 
-        # CYCLICAL detection first — these companies swing between profit/loss
-        # based on commodity/demand cycles, not business quality
-        cyclical_keywords = ["semiconductor","memory","steel","aluminum","copper",
-                             "oil","gas","mining","chemical","auto","airline",
-                             "shipping","commodity","paper","fertilizer"]
-        is_cyclical = any(k in industry or k in sector for k in cyclical_keywords)
-        if is_cyclical:
-            return "cyclical"
+        # PLATFORM SEMICONDUCTOR override — NVDA, AVGO, QCOM, ARM are NOT commodity cyclicals
+        # They have pricing power, high gross margins, and structural growth
+        # Commodity semis (memory/DRAM/NAND) ARE cyclical — INTC partially, MU yes, WDC yes
+        platform_semi_signals = (
+            "semiconductor" in industry and (
+                gm > 0.50 or                                    # high margins = pricing power
+                any(x in desc for x in ["gpu","graphics","ai chip","data center chip",
+                                         "neural","accelerat","inference","training"]) or
+                (mktcap > 200e9 and not any(x in desc for x in ["memory","dram","nand","flash","storage"]))
+            )
+        )
+        if platform_semi_signals:
+            # Treat as growth or mature, not cyclical
+            pass
+        else:
+            # TRUE commodity cyclicals — earnings swing with macro/commodity cycles
+            cyclical_keywords = [
+                "memory","dram","nand",           # commodity memory chips
+                "steel","aluminum","copper","iron",
+                "oil","gas","petroleum","refin",
+                "mining","gold","silver","coal",
+                "chemical","fertilizer","nitrogen",
+                "airline","shipping","freight",
+                "paper","timber","lumber",
+            ]
+            is_cyclical = any(k in industry or k in sector or k in desc[:200]
+                              for k in cyclical_keywords)
+            # Also catch auto manufacturers (not auto parts/software)
+            if "auto" in industry and "manufacturer" in industry:
+                is_cyclical = True
+            if is_cyclical:
+                return "cyclical"
 
         rv_r = [r for r in fin.index if "total revenue" in r.lower() or r.lower()=="revenue"] if not fin.empty else []
         rc_v = np.nan
         if rv_r:
-            s = [float(fin.loc[rv_r[0]].iloc[i]) for i in range(min(6,fin.shape[1])) if not pd.isna(fin.loc[rv_r[0]].iloc[i])]
+            s = [float(fin.loc[rv_r[0]].iloc[i]) for i in range(min(6,fin.shape[1]))
+                 if not pd.isna(fin.loc[rv_r[0]].iloc[i])]
             rc_v = cagr(s, 3)
         fast = (not np.isnan(rc_v) and rc_v > 0.15) or (not np.isnan(rg) and rg > 0.15)
 
@@ -468,40 +495,89 @@ def compute_score(info, hist, fin, bal, cf):
     sc["fcf"] = fcf_s; det["fcf"] = fcf_v; det["fcf_r"] = fcf_r
 
     # Expectations (20 pts)
+    # Priority order:
+    # 1. Analyst forward EPS growth estimate (most forward-looking, market consensus)
+    # 2. Analyst forward revenue growth estimate
+    # 3. Historical CAGR (backward-looking fallback only)
+    # This fixes cyclicals and oil stocks where historical numbers are misleading
+
     rc_s = 0; rc_v = np.nan
+    ec_s = 0; ec_v = np.nan
+    det["exp_source"] = "historical"  # track where estimate came from
+
     try:
-        if not fin.empty:
+        # ── FORWARD ESTIMATES (primary — analyst consensus) ──────────────────
+        # Yahoo provides: earningsGrowth (TTM YoY), revenueGrowth (TTM YoY)
+        # Also: forwardEps vs trailingEps gives implied 1Y growth
+        trailing_eps = safe_float(sg(info,"trailingEps",     np.nan))
+        forward_eps  = safe_float(sg(info,"forwardEps",      np.nan))
+        trailing_rev = safe_float(sg(info,"totalRevenue",    np.nan))
+        fwd_pe       = safe_float(sg(info,"forwardPE",       np.nan))
+        trail_pe     = safe_float(sg(info,"trailingPE",      np.nan))
+        yh_eg        = safe_float(sg(info,"earningsGrowth",  np.nan))
+        yh_rg        = safe_float(sg(info,"revenueGrowth",   np.nan))
+
+        # Forward EPS growth = (forward - trailing) / |trailing|
+        fwd_eps_growth = np.nan
+        if not np.isnan(trailing_eps) and not np.isnan(forward_eps) and trailing_eps != 0:
+            fwd_eps_growth = (forward_eps - trailing_eps) / abs(trailing_eps)
+
+        # Implied earnings growth from PE compression/expansion
+        pe_implied_growth = np.nan
+        if not np.isnan(fwd_pe) and not np.isnan(trail_pe) and fwd_pe > 0 and trail_pe > 0:
+            pe_implied_growth = (trail_pe / fwd_pe) - 1  # if fwd_pe < trail_pe, earnings growing
+
+        # Best revenue growth estimate: prefer YoY recent, fallback to CAGR
+        best_rg = np.nan
+        if not np.isnan(yh_rg): best_rg = yh_rg
+        if np.isnan(best_rg) and not fin.empty:
             rv_r = [r for r in fin.index if "total revenue" in r.lower() or r.lower()=="revenue"]
             if rv_r:
-                s = [float(fin.loc[rv_r[0]].iloc[i]) for i in range(min(6,fin.shape[1])) if not pd.isna(fin.loc[rv_r[0]].iloc[i])]
-                rc_v = cagr(s,5)
-                if np.isnan(rc_v): rc_v = cagr(s,3)
-                # Also consider Yahoo's recent growth
-                yh_rg = sg(info,"revenueGrowth",np.nan)
-                if not np.isnan(yh_rg) and np.isnan(rc_v): rc_v = yh_rg
-                if not np.isnan(rc_v):
-                    rc_s = 10 if rc_v>0.25 else 7 if rc_v>0.15 else 5 if rc_v>0.08 else 3 if rc_v>0 else 0
+                s = [float(fin.loc[rv_r[0]].iloc[i]) for i in range(min(6,fin.shape[1]))
+                     if not pd.isna(fin.loc[rv_r[0]].iloc[i])]
+                best_rg = cagr(s,3)
+
+        # Best EPS growth estimate: forward-derived first, then analyst growth, then historical
+        best_eg = np.nan
+        if not np.isnan(fwd_eps_growth):
+            best_eg = fwd_eps_growth
+            det["exp_source"] = "forward EPS"
+        elif not np.isnan(pe_implied_growth) and pe_implied_growth > -0.5:
+            best_eg = pe_implied_growth
+            det["exp_source"] = "PE-implied"
+        elif not np.isnan(yh_eg):
+            best_eg = yh_eg
+            det["exp_source"] = "TTM earnings growth"
+        else:
+            # Historical EPS CAGR as last resort
+            shares = safe_float(sg(info,"sharesOutstanding",np.nan))
+            ni_r   = [r for r in fin.index if r.lower() == "net income"] if not fin.empty else []
+            if ni_r and not np.isnan(shares) and shares > 0:
+                eps_s = [float(fin.loc[ni_r[0]].iloc[i])/shares
+                         for i in range(min(6,fin.shape[1]))
+                         if not pd.isna(fin.loc[ni_r[0]].iloc[i])]
+                eps_s = [x for x in eps_s if x > 0]
+                best_eg = cagr(eps_s,5)
+                if np.isnan(best_eg): best_eg = cagr(eps_s,3)
+                det["exp_source"] = "historical EPS CAGR"
+
+        rc_v = best_rg
+        ec_v = best_eg
+
+        # Score revenue growth
+        if not np.isnan(rc_v):
+            rc_s = 10 if rc_v>0.25 else 8 if rc_v>0.15 else 6 if rc_v>0.08 else 4 if rc_v>0.03 else 2 if rc_v>0 else 0
+
+        # Score earnings growth — weight more heavily for cyclicals using forward estimates
+        if not np.isnan(ec_v):
+            if stage == "cyclical":
+                # Cyclicals: be more generous — even modest positive forward growth is good
+                ec_s = 10 if ec_v>0.20 else 8 if ec_v>0.10 else 6 if ec_v>0.03 else 4 if ec_v>-0.05 else 2
+            else:
+                ec_s = 10 if ec_v>0.25 else 8 if ec_v>0.15 else 6 if ec_v>0.08 else 4 if ec_v>0.03 else 2 if ec_v>0 else 0
+
     except: pass
     sc["rc"] = rc_s; det["rc"] = rc_v
-
-    ec_s = 0; ec_v = np.nan
-    try:
-        # Use Yahoo's EPS growth if available
-        yh_eg = sg(info,"earningsGrowth",np.nan)
-        if not np.isnan(yh_eg) and yh_eg > 0:
-            ec_v = yh_eg
-            ec_s = 10 if yh_eg>0.25 else 7 if yh_eg>0.15 else 5 if yh_eg>0.08 else 3 if yh_eg>0 else 0
-        else:
-            shares = sg(info,"sharesOutstanding",np.nan)
-            ni_r   = [r for r in fin.index if "net income" in r.lower()] if not fin.empty else []
-            if ni_r and not np.isnan(shares) and shares > 0:
-                eps_s = [float(fin.loc[ni_r[0]].iloc[i])/shares for i in range(min(6,fin.shape[1])) if not pd.isna(fin.loc[ni_r[0]].iloc[i])]
-                eps_s = [x for x in eps_s if x > 0]
-                ec_v  = cagr(eps_s,5)
-                if np.isnan(ec_v): ec_v = cagr(eps_s,3)
-                if not np.isnan(ec_v):
-                    ec_s = 10 if ec_v>0.25 else 7 if ec_v>0.15 else 5 if ec_v>0.08 else 3 if ec_v>0 else 0
-    except: pass
     sc["ec"] = ec_s; det["ec"] = ec_v
 
     # Valuation (20 pts)
@@ -653,6 +729,9 @@ def analyze_7_powers(info, fin, cf, ticker, sector, industry, stage, det=None):
     is_marketplace= any(x in desc     for x in ["marketplace","platform","network","exchange"])
     is_payments   = any(x in industry for x in ["payment","credit","transaction"])
     is_luxury     = any(x in desc     for x in ["luxury","premium","heritage","exclusive"])
+    is_oil_gas    = any(x in industry or x in sector for x in ["oil","gas","petroleum","energy","refin","upstream","downstream","exploration"])
+    is_mining     = any(x in industry or x in sector for x in ["mining","gold","silver","copper","metal","mineral"])
+    is_industrial = any(x in sector   for x in ["industrial","manufacturing","capital goods"])
     is_large      = mktcap > 100e9
     is_mega       = mktcap > 500e9
 
@@ -662,16 +741,19 @@ def analyze_7_powers(info, fin, cf, ticker, sector, industry, stage, det=None):
     # Tighter: being large alone is NOT scale economies — you need margin proof
     if is_mega and gm > 0.55 and om > 0.25:
         v = "YES"
-        r = f"Mega-cap ({fmtn(mktcap,pre='$')}) with {gm*100:.0f}% gross / {om*100:.0f}% operating margins — fixed costs (R&D, infrastructure) amortized over enormous revenue base creates a structural unit cost advantage competitors cannot match without equivalent scale."
+        r = f"Mega-cap ({fmtn(mktcap,pre='$')}) with {gm*100:.0f}% gross / {om*100:.0f}% operating margins — fixed costs amortized over enormous revenue base creates structural unit cost advantage competitors cannot match without equivalent scale."
     elif is_semis and is_large and gm > 0.45:
         v = "YES"
-        r = f"Semiconductor scale: fab economics require $20B+ capex — only a handful of players reach sufficient volume for cost parity. {gm*100:.0f}% gross margins confirm the cost advantage is real."
+        r = f"Semiconductor scale: fab economics require $20B+ capex — only a handful of players reach sufficient volume for cost parity. {gm*100:.0f}% gross margins confirm the cost advantage."
+    elif (is_oil_gas or is_mining) and is_large:
+        v = "PARTIAL"
+        r = f"Scale matters in capital-intensive extractive industries — larger operators have lower lifting costs, better infrastructure access, and more bargaining power with suppliers. But commodity price exposure limits pure scale advantage."
     elif is_large and gm > 0.40 and om > 0.20 and rd_pct < 0.15:
         v = "YES"
-        r = f"Scale advantage evident: {gm*100:.0f}% gross margins with {om*100:.0f}% operating margins at ${mktcap/1e9:.0f}B scale. Low R&D intensity ({rd_pct*100:.0f}%) means margins come from operational efficiency, not just IP — classic scale economics."
+        r = f"Scale advantage evident: {gm*100:.0f}% gross / {om*100:.0f}% operating at ${mktcap/1e9:.0f}B scale. Low R&D intensity ({rd_pct*100:.0f}%) means margins come from operational efficiency — classic scale economics."
     elif mktcap > 20e9 and gm > 0.30 and om > 0.12:
         v = "PARTIAL"
-        r = f"Some scale advantage ({gm*100:.0f}% gross, {om*100:.0f}% operating), but not yet at the threshold where scale becomes a prohibitive competitive barrier. A well-funded entrant could potentially replicate."
+        r = f"Some scale advantage ({gm*100:.0f}% gross, {om*100:.0f}% operating), but not yet at the threshold where scale becomes a prohibitive competitive barrier."
     else:
         v = "NO"
         r = f"Insufficient evidence of scale-driven cost advantage. Gross margin {gm*100:.0f}% and market cap ${mktcap/1e9:.0f}B do not suggest meaningful unit cost superiority over competitors."
@@ -802,6 +884,18 @@ def analyze_7_powers(info, fin, cf, ticker, sector, industry, stage, det=None):
     elif is_semis and rd_pct > 0.10:
         v = "YES"
         r = f"Semiconductor IP with {rd_pct*100:.0f}% R&D spend — proprietary chip architectures and design tools take decades to replicate. Key engineers are also a cornered talent resource."
+    elif is_oil_gas and gm > 0.40:
+        v = "YES"
+        r = f"Oil & gas with {gm*100:.0f}% gross margins — mineral rights, drilling acreage, and proved reserves are geologically unique cornered resources. Prime locations cannot be replicated by competitors regardless of capital invested."
+    elif is_oil_gas:
+        v = "PARTIAL"
+        r = "Mineral rights and proved reserves represent partially cornered resources — their value depends on commodity prices and remaining reserve life. Location quality (Permian Basin vs. marginal fields) determines strength."
+    elif is_mining and gm > 0.35:
+        v = "YES"
+        r = f"Mining company with {gm*100:.0f}% gross margins — high-grade ore deposits are geologically scarce cornered resources. A competitor cannot build a better deposit regardless of how much they spend."
+    elif is_mining:
+        v = "PARTIAL"
+        r = "Mineral deposits are cornered resources by nature, but ore grade, location, and remaining mine life determine whether this constitutes a durable competitive advantage."
     elif ai_signal and rd_pct > 0.10:
         v = "YES"
         r = f"AI/ML research leadership with {rd_pct*100:.0f}% R&D intensity — the world's top AI researchers are a scarce human capital resource. Proprietary training data compounds this. Both are classic cornered resources."
@@ -1219,10 +1313,16 @@ with tab_research:
                     ("ROA",    pct(roa)),
                 ]),
                 ("INCOME (TTM)", [
-                    ("Revenue",  fmtn(rev,pre="$")),
+                    ("Revenue",   fmtn(rev,pre="$")),
                     ("Net Income",fmtn(ni,pre="$")),
-                    ("FCF",      fmtn(fcf,pre="$")),
-                    ("EBITDA",   fmtn(ebitda,pre="$")),
+                    ("FCF",       fmtn(fcf,pre="$")),
+                    ("EBITDA",    fmtn(ebitda,pre="$")),
+                ]),
+                (f"EXPECTATIONS — {det.get('exp_source','').upper()}", [
+                    ("Revenue Growth",  pct(det.get("rc",np.nan))),
+                    ("Earnings Growth", pct(det.get("ec",np.nan))),
+                    ("Forward EPS",     f"${safe_float(sg(info,'forwardEps',np.nan)):.2f}" if not np.isnan(safe_float(sg(info,'forwardEps',np.nan))) else "N/A"),
+                    ("Trailing EPS",    f"${safe_float(sg(info,'trailingEps',np.nan)):.2f}" if not np.isnan(safe_float(sg(info,'trailingEps',np.nan))) else "N/A"),
                 ]),
                 ("VALUATION", [
                     ("Trailing P/E", f"{pe_v:.1f}x" if not np.isnan(pe_v) else "N/A"),
