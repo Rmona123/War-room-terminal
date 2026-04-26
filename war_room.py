@@ -321,16 +321,30 @@ def get_price(info, hist):
 
 # ── SCORING ───────────────────────────────────────────────────────────────────
 def detect_stage(info, fin):
+    """Detect GROWTH vs MATURE vs CYCLICAL stage."""
     try:
         ni = sr(fin, "Net Income")
-        gm = sg(info, "grossMargins", np.nan)
-        rg = sg(info, "revenueGrowth", np.nan)
+        gm = safe_float(sg(info, "grossMargins", np.nan))
+        rg = safe_float(sg(info, "revenueGrowth", np.nan))
+        sector   = (sg(info,"sector","") or "").lower()
+        industry = (sg(info,"industry","") or "").lower()
+
+        # CYCLICAL detection first — these companies swing between profit/loss
+        # based on commodity/demand cycles, not business quality
+        cyclical_keywords = ["semiconductor","memory","steel","aluminum","copper",
+                             "oil","gas","mining","chemical","auto","airline",
+                             "shipping","commodity","paper","fertilizer"]
+        is_cyclical = any(k in industry or k in sector for k in cyclical_keywords)
+        if is_cyclical:
+            return "cyclical"
+
         rv_r = [r for r in fin.index if "total revenue" in r.lower() or r.lower()=="revenue"] if not fin.empty else []
         rc_v = np.nan
         if rv_r:
             s = [float(fin.loc[rv_r[0]].iloc[i]) for i in range(min(6,fin.shape[1])) if not pd.isna(fin.loc[rv_r[0]].iloc[i])]
             rc_v = cagr(s, 3)
         fast = (not np.isnan(rc_v) and rc_v > 0.15) or (not np.isnan(rg) and rg > 0.15)
+
         if not np.isnan(ni) and ni < 0 and (fast or (not np.isnan(gm) and gm > 0.35)):
             return "growth"
         if np.isnan(sg(info,"trailingPE",np.nan)) and fast:
@@ -351,14 +365,51 @@ def compute_score(info, hist, fin, bal, cf):
         td = sr(bal,"Total Debt")
         if np.isnan(td): td = sr(bal,"Long Term Debt", default=0)
         denom = eq + (td if not np.isnan(td) else 0)
-        if not any(np.isnan(x) for x in [ni,eq]) and denom != 0:
-            crp_v = ni / denom
-            if stage == "growth":
-                gm = sg(info,"grossMargins",np.nan)
-                crp_s = 10 if not np.isnan(gm) and gm>0.60 else 7 if not np.isnan(gm) and gm>0.45 else 5 if not np.isnan(gm) and gm>0.30 else 3
+
+        if stage == "cyclical":
+            # For cyclicals: score on THROUGH-CYCLE quality, not just latest year
+            # Use average NI over available years to normalize the cycle
+            gm_v  = safe_float(sg(info,"grossMargins",np.nan))
+            ni_ttm = safe_float(sg(info,"netIncomeToCommon",np.nan))
+            fcf_v  = safe_float(sg(info,"freeCashflow",np.nan))
+            rev_v  = safe_float(sg(info,"totalRevenue",np.nan))
+
+            # Try to get multi-year average NI from financials
+            ni_rows = [r for r in fin.index if r.lower() == "net income"] if not fin.empty else []
+            avg_ni = np.nan
+            if ni_rows and fin.shape[1] >= 3:
+                ni_vals = [float(fin.loc[ni_rows[0]].iloc[i])
+                           for i in range(min(5,fin.shape[1]))
+                           if not pd.isna(fin.loc[ni_rows[0]].iloc[i])]
+                if ni_vals:
+                    avg_ni = np.mean(ni_vals)
+
+            # Score on: gross margin (structural quality) + avg NI + positive FCF
+            if not np.isnan(gm_v) and gm_v > 0.40:
+                crp_s = 9  # high structural margins = quality cyclical
+            elif not np.isnan(gm_v) and gm_v > 0.25:
+                crp_s = 7
+            elif not np.isnan(avg_ni) and avg_ni > 0:
+                crp_s = 6  # profitable through-cycle on average
+            elif not np.isnan(fcf_v) and fcf_v > 0:
+                crp_s = 5  # at least generating cash
             else:
+                crp_s = 3  # cyclical trough — normal, not a red flag
+
+            if denom != 0 and not np.isnan(avg_ni):
+                crp_v = avg_ni / denom  # normalized CRP
+
+        elif stage == "growth":
+            gm_v = safe_float(sg(info,"grossMargins",np.nan))
+            if not np.isnan(gm_v):
+                crp_s = 10 if gm_v>0.60 else 7 if gm_v>0.45 else 5 if gm_v>0.30 else 3
+            else:
+                crp_s = 3
+        else:
+            # Mature company
+            if not any(np.isnan(x) for x in [ni,eq]) and denom != 0:
+                crp_v = ni / denom
                 crp_s = 10 if crp_v>0.20 else 8 if crp_v>0.15 else 5 if crp_v>0.10 else 3 if crp_v>0.05 else 1
-        elif stage=="growth": crp_s = 3
     except: pass
     sc["crp"] = crp_s; det["crp"] = crp_v
 
@@ -375,7 +426,11 @@ def compute_score(info, hist, fin, bal, cf):
                     except: pass
                 if len(om_trend) >= 2:
                     delta = om_trend[0] - om_trend[-1]
-                    if stage == "growth":
+                    if stage == "cyclical":
+                        # For cyclicals judge on average margin level, not trend
+                        avg_om = np.mean(om_trend)
+                        om_s = 10 if avg_om>0.20 else 7 if avg_om>0.12 else 5 if avg_om>0.05 else 3 if avg_om>0 else 2
+                    elif stage == "growth":
                         om_s = 10 if delta>0.05 else 7 if delta>0.02 else 5 if delta>0 else 3 if delta>-0.03 else 1
                     else:
                         om_s = 10 if delta>0.03 else 7 if delta>0 else 4 if delta>-0.02 else 1
@@ -389,7 +444,13 @@ def compute_score(info, hist, fin, bal, cf):
         ni_ttm    = sg(info,"netIncomeToCommon",np.nan)
         if not np.isnan(fcf_yahoo):
             fcf_v = fcf_yahoo
-            if stage == "growth":
+            if stage == "cyclical":
+                # Don't penalize for negative FCF in a down cycle
+                # Score on FCF/Revenue margin as a structural quality indicator
+                rev_v = safe_float(sg(info,"totalRevenue",np.nan)) or 1
+                fcf_margin_v = fcf_yahoo / rev_v
+                fcf_s = 10 if fcf_margin_v > 0.15 else 8 if fcf_margin_v > 0.08 else 6 if fcf_margin_v > 0.02 else 4 if fcf_margin_v > -0.05 else 2
+            elif stage == "growth":
                 fcf_s = 10 if fcf_v>0 else 6 if fcf_v>-1e8 else 3 if fcf_v>-5e8 else 1
             else:
                 if not np.isnan(ni_ttm) and ni_ttm > 0:
@@ -1071,7 +1132,7 @@ with tab_research:
 
             c1,c2,c3,c4,c5 = st.columns(5)
             rl_color = "#10b981" if rl=="LOW" else "#f59e0b" if rl=="MEDIUM" else "#ef4444"
-            stage_color = "#f59e0b" if stage=="growth" else "#64748b"
+            stage_color = "#f59e0b" if stage=="growth" else "#60a5fa" if stage=="cyclical" else "#64748b"
             for col,(lbl,val,vc) in zip([c1,c2,c3,c4,c5],[
                 ("Market Cap",   fmtn(mktcap,pre="$"),  "#f1f5f9"),
                 ("52W High",     f"${w52h:.2f}" if not np.isnan(w52h) else "N/A", "#f1f5f9"),
