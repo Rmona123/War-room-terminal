@@ -1040,7 +1040,7 @@ with h1:
 with h2:
     ticker_input=st.text_input("",placeholder="Ticker (e.g. NVDA)",label_visibility="collapsed")
 
-tab_r,tab_w,tab_c=st.tabs(["🔍 Research","📋 Watchlist","⚖️ Compare"])
+tab_r,tab_w,tab_c,tab_gs=st.tabs(["🔍 Research","📋 Watchlist","⚖️ Compare","📄 GS Report"])
 
 # ═══════════════════════════════════════════════════════════════════════════
 # TAB 1 — RESEARCH
@@ -1431,3 +1431,375 @@ with tab_c:
                         chg_t=(prices[-1]-prices[0])/prices[0]*100 if len(prices)>1 else 0
                         cc="#10b981" if chg_t>=0 else "#ef4444"
                         st.markdown(f'<div style="text-align:center;font-size:0.78rem;color:{cc};font-weight:600;">{chg_t:+.1f}% 2Y</div>',unsafe_allow_html=True)
+
+# ═══════════════════════════════════════════════════════════════════════════
+# TAB 4 — GOLDMAN SACHS STYLE RESEARCH REPORT
+# ═══════════════════════════════════════════════════════════════════════════
+def build_gs_report(ticker, info, hist, fin, bal, cf, res, macro):
+    """Build a full Goldman Sachs-style equity research report string."""
+    name        = sg(info,"longName",ticker) or ticker
+    sector      = sg(info,"sector","—")
+    industry    = sg(info,"industry","—")
+    stage       = res["stage"]
+    stype       = res["stype"]
+    score       = res["total"]
+    signal,_    = get_signal(score, hist)
+    price       = get_price(info, hist)
+    mktcap      = sf(sg(info,"marketCap",np.nan))
+    gm          = sf(sg(info,"grossMargins",np.nan))
+    om          = sf(sg(info,"operatingMargins",np.nan))
+    nm          = sf(sg(info,"profitMargins",np.nan))
+    rev         = sf(sg(info,"totalRevenue",np.nan))
+    ni          = sf(sg(info,"netIncomeToCommon",np.nan))
+    fcf         = sf(sg(info,"freeCashflow",np.nan))
+    ebitda      = sf(sg(info,"ebitda",np.nan))
+    cash        = sf(sg(info,"totalCash",np.nan))
+    debt        = sf(sg(info,"totalDebt",np.nan))
+    pe_t        = sf(sg(info,"trailingPE",np.nan))
+    pe_f        = sf(sg(info,"forwardPE",np.nan))
+    ps          = sf(sg(info,"priceToSalesTrailingTwelveMonths",np.nan))
+    pb          = sf(sg(info,"priceToBook",np.nan))
+    ev_eb       = sf(sg(info,"enterpriseToEbitda",np.nan))
+    roe         = sf(sg(info,"returnOnEquity",np.nan))
+    roa         = sf(sg(info,"returnOnAssets",np.nan))
+    beta        = res["t_det"].get("beta", np.nan)
+    rsi         = res["t_det"].get("rsi", np.nan)
+    de          = sf(sg(info,"debtToEquity",np.nan))
+    cr          = sf(sg(info,"currentRatio",np.nan))
+    dy          = sf(sg(info,"dividendYield",np.nan))
+    employees   = sf(sg(info,"fullTimeEmployees",np.nan))
+    rec         = sg(info,"recommendationKey","")
+    target      = sf(sg(info,"targetMeanPrice",np.nan))
+    n_analysts  = sf(sg(info,"numberOfAnalystOpinions",np.nan))
+    desc        = sg(info,"longBusinessSummary","") or "No description available."
+    website     = sg(info,"website","")
+    rg          = res["e_det"].get("rg", np.nan)
+    eg          = res["e_det"].get("eg", np.nan)
+    upside      = res["e_det"].get("upside", np.nan)
+    fwd_eps     = res["e_det"].get("fwd_eps", np.nan)
+    trail_eps   = res["e_det"].get("trailing_eps", np.nan)
+    fcf_yield   = res["v_det"].get("fcf_yield", np.nan)
+    p_det       = res["p_det"]
+    confirmed   = [p for p,d in p_det.items() if d["verdict"]=="YES"]
+    partial     = [p for p,d in p_det.items() if d["verdict"]=="PARTIAL"]
+
+    # OM trend from financials
+    om_trend = []
+    try:
+        op_r = [r for r in fin.index if "operating" in r.lower() and "income" in r.lower()]
+        rv_r = [r for r in fin.index if "total revenue" in r.lower() or r.lower()=="revenue"]
+        if op_r and rv_r and not fin.empty:
+            for i in range(min(5,fin.shape[1])):
+                try:
+                    op=float(fin.loc[op_r[0]].iloc[i]); rv_=float(fin.loc[rv_r[0]].iloc[i])
+                    if rv_>0: om_trend.append(f"{op/rv_*100:.1f}%")
+                except: pass
+    except: pass
+
+    # Revenue trend
+    rev_trend = []
+    try:
+        rv_r = [r for r in fin.index if "total revenue" in r.lower() or r.lower()=="revenue"]
+        if rv_r and not fin.empty:
+            dates = [str(fin.columns[i].year) if hasattr(fin.columns[i],'year') else f"FY-{i}" for i in range(min(5,fin.shape[1]))]
+            vals  = [float(fin.loc[rv_r[0]].iloc[i]) for i in range(min(5,fin.shape[1])) if not pd.isna(fin.loc[rv_r[0]].iloc[i])]
+            rev_trend = [f"{d}: {fmtn(v,pre='$')}" for d,v in zip(dates,vals)]
+    except: pass
+
+    # Bull price target: +25% for STRONG BUY, +15% for BUY
+    bull_target = price * 1.25 if signal in ["STRONG BUY","BUY"] else price * 1.10
+    bear_target = price * 0.75 if signal in ["AVOID"] else price * 0.85
+    analyst_target_str = f"${target:.2f}" if not np.isnan(target) else "N/A"
+
+    date_str = datetime.now().strftime("%B %d, %Y")
+
+    # ── CONVICTION / RATING MAPPING ──────────────────────────────────────────
+    conviction_map = {"STRONG BUY":"BUY — High Conviction","BUY":"BUY — Medium Conviction",
+                      "NEUTRAL":"NEUTRAL — Hold","AVOID":"SELL — High Conviction"}
+    gs_rating = conviction_map.get(signal,"NEUTRAL — Hold")
+
+    # ── MOAT STRENGTH ─────────────────────────────────────────────────────────
+    moat_items = []
+    for p,d in p_det.items():
+        if d["verdict"] in ["YES","PARTIAL"]:
+            moat_items.append(f"  • {p} ({'Confirmed' if d['verdict']=='YES' else 'Partial'}): {d['reasoning']}")
+    moat_str = "\n".join(moat_items) if moat_items else "  • No significant moat sources identified at this stage."
+
+    # ── MACRO CONTEXT ─────────────────────────────────────────────────────────
+    macro_items = [f"  • {t}: {b}" for t,b in res.get("macro_factors",[])]
+    macro_str = "\n".join(macro_items) if macro_items else "  • No significant macro factors identified."
+
+    report = f"""
+╔══════════════════════════════════════════════════════════════════════════════════╗
+║          EQUITY RESEARCH — INSTITUTIONAL CLIENT REPORT                         ║
+║          {name:<50} [{ticker}]        ║
+╚══════════════════════════════════════════════════════════════════════════════════╝
+
+  Rating:      {gs_rating}
+  Price:       ${price:.2f}          War Room Score: {score:.1f}/100
+  Sector:      {sector} / {industry}
+  Stage:       {stage.replace('_',' ').upper()} — {stype.upper()}
+  Mkt Cap:     {fmtn(mktcap,pre="$")}      Analyst Target: {analyst_target_str} ({f"{upside*100:.1f}% upside" if not np.isnan(upside) else "N/A"})
+  Date:        {date_str}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  1. EXECUTIVE SUMMARY
+  ─────────────────────────────────────────────────────────────────────────────────
+  {desc[:400]}{"..." if len(desc)>400 else ""}
+
+  INVESTMENT THESIS:
+  {name} is classified as a {stage.replace('_',' ')} {stype} company. Our War Room
+  scoring model assigns a composite score of {score:.1f}/100 (base: {res["base"]:.1f},
+  macro overlay: {res["macro_delta"]:+.1f} pts), generating a {signal} signal.
+
+  Key positives: {", ".join([t.replace("🟢 ","").replace("🔴 ","").replace("🟡 ","") for t,_ in res.get("macro_factors",[]) if "🟢" in t][:3]) or "See section 6."}
+  Key risks:     {", ".join([t.replace("🟢 ","").replace("🔴 ","").replace("🟡 ","") for t,_ in res.get("macro_factors",[]) if "🔴" in t][:3]) or "See section 7."}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  2. FINANCIAL PERFORMANCE & HEALTH
+  ─────────────────────────────────────────────────────────────────────────────────
+
+  A. INCOME STATEMENT (TTM)
+  ┌─────────────────────────────────────────────────────────────┐
+  │  Revenue (TTM):          {fmtn(rev,pre="$"):<20}                │
+  │  Gross Margin:           {pct(gm):<20}                │
+  │  Operating Margin:       {pct(om):<20}                │
+  │  Net Margin:             {pct(nm):<20}                │
+  │  Net Income (TTM):       {fmtn(ni,pre="$"):<20}                │
+  │  EBITDA:                 {fmtn(ebitda,pre="$"):<20}                │
+  │  EPS (Trailing):         {"${:.2f}".format(trail_eps) if not np.isnan(trail_eps) else "N/A":<20}                │
+  │  EPS (Forward):          {"${:.2f}".format(fwd_eps) if not np.isnan(fwd_eps) else "N/A":<20}                │
+  └─────────────────────────────────────────────────────────────┘
+
+  Revenue Trend (most recent first):
+  {chr(10).join("  " + r for r in rev_trend) if rev_trend else "  Data unavailable."}
+
+  Operating Margin Trend (most recent first):
+  {("  " + " → ".join(om_trend)) if om_trend else "  Data unavailable."}
+
+  Revenue Growth (YoY):      {pct(rg)}
+  Earnings Growth:           {pct(eg)} ({res["e_det"].get("source","")})
+  ROE:                       {pct(roe)}
+  ROA:                       {pct(roa)}
+
+  B. BALANCE SHEET
+  ┌─────────────────────────────────────────────────────────────┐
+  │  Cash & Equivalents:     {fmtn(cash,pre="$"):<20}                │
+  │  Total Debt:             {fmtn(debt,pre="$"):<20}                │
+  │  Net Cash/(Debt):        {fmtn((cash or 0)-(debt or 0),pre="$"):<20}                │
+  │  Debt-to-Equity:         {"{:.2f}x".format(de/100) if not np.isnan(de) else "N/A":<20}                │
+  │  Current Ratio:          {"{:.2f}x".format(cr) if not np.isnan(cr) else "N/A":<20}                │
+  │  Employees:              {"{:,.0f}".format(employees) if not np.isnan(employees) else "N/A":<20}                │
+  └─────────────────────────────────────────────────────────────┘
+
+  Balance Sheet Assessment:
+  {"NET CASH position — fortress balance sheet. Financial flexibility to invest, buyback, or withstand downturns." if not np.isnan(cash) and not np.isnan(debt) and cash > debt else "Net debt position. Monitor leverage vs. cash generation capacity." if not np.isnan(cash) and not np.isnan(debt) else "Balance sheet data limited."}
+
+  C. CASH FLOW
+  ┌─────────────────────────────────────────────────────────────┐
+  │  Free Cash Flow (TTM):   {fmtn(fcf,pre="$"):<20}                │
+  │  FCF Yield:              {pct(fcf_yield):<20}                │
+  │  Dividend Yield:         {pct(dy) if not np.isnan(dy) else "None":<20}                │
+  └─────────────────────────────────────────────────────────────┘
+
+  FCF Quality: {"STRONG — FCF substantially positive, converts earnings to cash effectively." if not np.isnan(fcf) and fcf > 0 and not np.isnan(ni) and ni > 0 and fcf/ni > 0.7 else "MODERATE — FCF positive but conversion ratio warrants monitoring." if not np.isnan(fcf) and fcf > 0 else "WEAK/NEGATIVE — Company is cash flow negative. Monitor burn rate and runway." if not np.isnan(fcf) and fcf < 0 else "Insufficient data."}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  3. VALUATION
+  ─────────────────────────────────────────────────────────────────────────────────
+  ┌─────────────────────────────────────────────────────────────┐
+  │  Metric          Current       Interpretation               │
+  │  ─────────────────────────────────────────────────────────  │
+  │  Trailing P/E    {"{:.1f}x".format(pe_t) if not np.isnan(pe_t) else "N/A":<14}{"Expensive (>30x)" if not np.isnan(pe_t) and pe_t>30 else "Moderate (15-30x)" if not np.isnan(pe_t) and pe_t>15 else "Cheap (<15x)" if not np.isnan(pe_t) else "N/A (no earnings)"}     │
+  │  Forward P/E     {"{:.1f}x".format(pe_f) if not np.isnan(pe_f) else "N/A":<14}{"Growth priced in" if not np.isnan(pe_f) and pe_f>25 else "Reasonable" if not np.isnan(pe_f) and pe_f>12 else "Value territory" if not np.isnan(pe_f) else "N/A"}     │
+  │  Price/Sales     {"{:.2f}x".format(ps) if not np.isnan(ps) else "N/A":<14}{"Premium" if not np.isnan(ps) and ps>8 else "Moderate" if not np.isnan(ps) and ps>3 else "Value" if not np.isnan(ps) else "N/A"}     │
+  │  Price/Book      {"{:.2f}x".format(pb) if not np.isnan(pb) else "N/A":<14}{"Premium" if not np.isnan(pb) and pb>4 else "Moderate" if not np.isnan(pb) and pb>1.5 else "At/below book" if not np.isnan(pb) else "N/A"}     │
+  │  EV/EBITDA       {"{:.1f}x".format(ev_eb) if not np.isnan(ev_eb) else "N/A":<14}{"Rich" if not np.isnan(ev_eb) and ev_eb>20 else "Fair" if not np.isnan(ev_eb) and ev_eb>10 else "Cheap" if not np.isnan(ev_eb) else "N/A"}     │
+  │  FCF Yield       {pct(fcf_yield):<14}{"Above Treasury — attractive" if not np.isnan(fcf_yield) and fcf_yield > 0.044 else "Below Treasury — rich" if not np.isnan(fcf_yield) and fcf_yield > 0 else "Negative" if not np.isnan(fcf_yield) else "N/A"}     │
+  └─────────────────────────────────────────────────────────────┘
+
+  PEG Ratio: {"{:.2f}".format(res["v_det"].get("peg",np.nan)) if not np.isnan(res["v_det"].get("peg",np.nan)) else "N/A (no earnings/growth data)"}
+  Valuation Score (model): {res["v"]:.0f}/100
+
+  VALUATION VERDICT: {"The stock appears FAIRLY to EXPENSIVELY valued at current levels, with multiple catalysts already priced in. Upside requires execution above consensus." if res["v"] < 50 else "The stock appears REASONABLY VALUED relative to growth prospects and peer group. Current multiple offers adequate margin of safety." if res["v"] < 70 else "The stock appears ATTRACTIVELY VALUED relative to earnings power and growth. Current multiple represents a compelling entry point."}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  4. BUSINESS MODEL & COMPETITIVE MOAT
+  ─────────────────────────────────────────────────────────────────────────────────
+
+  SECTOR / STAGE: {stype.upper()} — {stage.replace('_',' ').upper()}
+
+  MOAT ANALYSIS (Helmer 7 Powers Framework):
+  Confirmed Powers ({len(confirmed)}): {", ".join(confirmed) if confirmed else "None confirmed"}
+  Partial Powers  ({len(partial)}):  {", ".join(partial) if partial else "None"}
+
+{moat_str}
+
+  MOAT STRENGTH RATING: {"WIDE — Multiple confirmed durable competitive advantages." if len(confirmed)>=3 else "MODERATE — Some competitive advantages but not fully entrenched." if len(confirmed)>=1 or len(partial)>=2 else "NARROW/NONE — Limited evidence of durable competitive advantages."}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  5. GROWTH STRATEGY & FUTURE OUTLOOK
+  ─────────────────────────────────────────────────────────────────────────────────
+
+  Revenue Growth (Current):   {pct(rg)}
+  Earnings Growth (Forward):  {pct(eg)} — Source: {res["e_det"].get("source","")}
+  Analyst Consensus Target:   {analyst_target_str} ({pct(upside)} upside from current)
+  Number of Analysts:         {"{:.0f}".format(n_analysts) if not np.isnan(n_analysts) else "N/A"}
+  Consensus Rating:           {rec.upper() if rec else "N/A"}
+
+  GROWTH OUTLOOK:
+  {"STRONG GROWTH TRAJECTORY — Revenue and earnings growing above 15%. Company is in expansion phase with runway ahead." if not np.isnan(rg) and rg > 0.15 and not np.isnan(eg) and eg > 0.10 else "MODERATE GROWTH — Single-digit to low double-digit growth expected. Stable compounder characteristics." if not np.isnan(rg) and rg > 0.05 else "MUTED/DECLINING GROWTH — Revenue growth weak or negative. Focus on margin expansion and capital returns rather than top-line growth." if not np.isnan(rg) else "Growth data unavailable — requires deeper fundamental research."}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  6. MACRO CONTEXT & SECTOR DYNAMICS
+  ─────────────────────────────────────────────────────────────────────────────────
+
+  Macro Overlay Impact: {res["macro_delta"]:+.1f} pts (adjusts base score {res["base"]:.1f} → final {res["total"]:.1f})
+
+{macro_str}
+
+  VIX (Fear Index):     {"{:.1f}".format(macro.get("vix",np.nan)) if not np.isnan(macro.get("vix",np.nan)) else "N/A"}
+  S&P 500 (3M):         {pct(macro.get("spy_3m",np.nan))}
+  Beta:                 {"{:.2f}".format(beta) if not np.isnan(beta) else "N/A"}
+  RS vs S&P 500 (3M):   {pct(res["t_det"].get("rs_spy",np.nan))}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  7. RISK ANALYSIS
+  ─────────────────────────────────────────────────────────────────────────────────
+
+  IDIOSYNCRATIC RISKS (Company-Specific):
+  • Valuation risk: {"Multiple is demanding — any earnings miss could trigger significant derating." if not np.isnan(pe_f) and pe_f > 30 else "Valuation appears reasonable — limited multiple expansion risk." if not np.isnan(pe_f) else "No forward P/E available — valuation risk unclear."}
+  • Balance sheet: {"NET CASH — minimal financial distress risk." if not np.isnan(cash) and not np.isnan(debt) and cash>debt else "Leveraged balance sheet — rising rates or profit deterioration could stress coverage ratios." if not np.isnan(de) and de/100>1.5 else "Moderate leverage — manageable in current environment."}
+  • Moat durability: {"Strong moat ({} confirmed powers) — low disruption risk near-term.".format(len(confirmed)) if len(confirmed)>=3 else "Moderate moat — monitor for competitive encroachment." if len(confirmed)>=1 else "Weak moat — highly susceptible to competitive disruption."}
+
+  SYSTEMIC RISKS (Market/Macro):
+  • Rate sensitivity: {"HIGH — {stage} companies are long-duration assets. Rising rates compress multiples significantly.".format(stage=stage) if stage in ["growth","early_stage"] else "MODERATE — mature company, more sensitive to recession than rate changes." if stage=="mature" else "HIGH — cyclical companies face earnings collapse in rate-driven recessions."}
+  • Recession scenario: {"Revenue would likely contract sharply — high operating leverage amplifies downside." if not np.isnan(beta) and beta>1.5 else "Defensive characteristics limit recession downside." if not np.isnan(beta) and beta<0.8 else "Moderate recession sensitivity — beta suggests market-like drawdown."}
+  • Regulatory/geopolitical: {"Semiconductor/tech sector faces export controls and geopolitical risk (US-China)." if stype in ["semis","tech"] else "Energy sector faces regulatory transition risk (carbon pricing, permits)." if stype=="energy" else "Monitor sector-specific regulatory developments."}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  8. PRICE TARGETS & SCENARIOS
+  ─────────────────────────────────────────────────────────────────────────────────
+
+  Current Price:         ${price:.2f}
+  ┌────────────────────────────────────────────────────────────────────┐
+  │  BULL CASE (12M):   ${bull_target:.2f}    (+{(bull_target/price-1)*100:.0f}%)                        │
+  │  Assumes: Multiple expansion, earnings acceleration, positive      │
+  │  macro tailwinds, moat strengthening.                              │
+  │                                                                    │
+  │  BASE CASE (12M):   ${price*(1+((upside if not np.isnan(upside) else 0.08))):.2f}    ({(upside if not np.isnan(upside) else 0.08)*100:+.0f}%)  Analyst consensus target      │
+  │  Assumes: Revenue/earnings grow in line with consensus,            │
+  │  macro environment remains neutral.                                │
+  │                                                                    │
+  │  BEAR CASE (12M):   ${bear_target:.2f}    ({(bear_target/price-1)*100:.0f}%)                        │
+  │  Assumes: Earnings miss, multiple compression, macro headwinds,    │
+  │  competitive pressure intensifies.                                 │
+  └────────────────────────────────────────────────────────────────────┘
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  9. FINAL RECOMMENDATION
+  ─────────────────────────────────────────────────────────────────────────────────
+
+  ╔══════════════════════════════════════════════════════════╗
+  ║  RATING:     {gs_rating:<44}  ║
+  ║  SCORE:      {score:.1f}/100 (Stage: {stage.replace('_',' ').upper()}, Sector: {stype.upper()}){"" :<15}  ║
+  ║  PRICE:      ${price:.2f}                                            ║
+  ║  TARGET:     {analyst_target_str:<44}  ║
+  ╚══════════════════════════════════════════════════════════╝
+
+  VERDICT:
+  {"Strong conviction BUY. The combination of confirmed competitive moats, strong growth trajectory, positive macro tailwinds, and technical momentum makes this a compelling entry point. The stock demonstrates the characteristics of a durable compounder." if signal=="STRONG BUY" else "BUY with moderate conviction. The fundamental picture is solid with identifiable growth drivers and reasonable valuation. Position sizing should reflect stage-appropriate risk tolerance." if signal=="BUY" else "HOLD/NEUTRAL. The stock is fairly valued at current levels with balanced risk/reward. Existing holders should maintain positions; new buyers should await a better entry or more fundamental clarity." if signal=="NEUTRAL" else "AVOID/SELL. Risk/reward is unfavorable at current levels. The combination of weak fundamentals, challenging valuation, and negative macro context suggests better opportunities exist elsewhere. Consider reducing exposure."}
+
+  WEIGHT DISTRIBUTION USED (Stage/Sector Adjusted):
+  Quality {res["weights"]["quality"]}pts · Expectations {res["weights"]["expectations"]}pts · Valuation {res["weights"]["valuation"]}pts · Technicals {res["weights"]["technicals"]}pts · 7 Powers {res["weights"]["powers"]}pts
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  DISCLAIMER: This report is generated for educational purposes only and does not
+  constitute financial advice. All data sourced from Yahoo Finance. Always conduct
+  your own due diligence before making investment decisions.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+"""
+    return report
+
+
+with tab_gs:
+    st.markdown("""
+    <div style="background:#0d1525;border:1px solid #1a2540;border-radius:12px;padding:18px 24px;margin-bottom:20px;">
+        <div style="font-size:1.2rem;font-weight:700;color:#f1f5f9;">📄 Goldman Sachs-Style Equity Research Report</div>
+        <div style="font-size:0.8rem;color:#64748b;margin-top:4px;">Full institutional-grade analysis using our dynamic scoring engine + Helmer 7 Powers + Macro Overlay</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    gs_col1, gs_col2 = st.columns([2,1])
+    with gs_col1:
+        gs_ticker = st.text_input("Enter ticker for report", value=ticker_input or "AAPL",
+                                   placeholder="e.g. NVDA, AAPL, CHRD", key="gs_ticker")
+    with gs_col2:
+        st.markdown("<br>", unsafe_allow_html=True)
+        gen_btn = st.button("📄 Generate Full Research Report", key="gen_gs")
+
+    if gen_btn and gs_ticker:
+        t = gs_ticker.strip().upper()
+        with st.spinner(f"Building institutional research report for {t}..."):
+            gs_info, gs_hist_raw, gs_fin, gs_bal, gs_cf = load(t)
+            gs_hist = add_ta(gs_hist_raw)
+            gs_macro = load_macro()
+            qt_gs = (sg(gs_info,"quoteType","") or "").upper()
+            if qt_gs in ["ETF","MUTUALFUND"]:
+                st.warning("GS Report is designed for individual stocks. ETFs/funds are not supported.")
+            elif not gs_info and gs_hist.empty:
+                st.error(f"No data found for {t}")
+            else:
+                gs_res = master_score(gs_info, gs_hist, gs_fin, gs_bal, gs_cf, gs_macro)
+                report_text = build_gs_report(t, gs_info, gs_hist, gs_fin, gs_bal, gs_cf, gs_res, gs_macro)
+
+                # Display report
+                sig_gs, sc_gs = get_signal(gs_res["total"], gs_hist)
+                sc_color = {"STRONG BUY":"#10b981","BUY":"#3b82f6","NEUTRAL":"#f59e0b","AVOID":"#ef4444"}.get(sig_gs,"#64748b")
+                price_gs = get_price(gs_info, gs_hist)
+
+                st.markdown(f"""
+                <div style="background:#0d1525;border:2px solid {sc_color};border-radius:12px;padding:16px 24px;margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;">
+                    <div>
+                        <div style="font-size:1.4rem;font-weight:700;color:#f1f5f9;">{sg(gs_info,"longName",t)} ({t})</div>
+                        <div style="font-size:0.8rem;color:#64748b;">{sg(gs_info,"sector","—")} · {gs_res["stage"].replace("_"," ").upper()} · {gs_res["stype"].upper()}</div>
+                    </div>
+                    <div style="text-align:right;">
+                        <div style="font-family:'JetBrains Mono',monospace;font-size:2rem;font-weight:700;color:{sc_color};">{gs_res["total"]:.1f}</div>
+                        <div style="font-size:0.75rem;color:{sc_color};">{sig_gs}</div>
+                        <div style="font-size:0.8rem;color:#94a3b8;">${price_gs:.2f}</div>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+
+                st.text_area("", value=report_text, height=700, label_visibility="collapsed", key="report_display")
+
+                st.download_button(
+                    label="⬇️ Download Report (.txt)",
+                    data=report_text,
+                    file_name=f"WarRoom_GS_Report_{t}_{datetime.now().strftime('%Y%m%d')}.txt",
+                    mime="text/plain",
+                    key="download_report"
+                )
+
+                st.caption("Report uses Yahoo Finance data. For educational purposes only — not financial advice.")
+    else:
+        st.markdown("""
+        <div style="text-align:center;padding:60px 20px;color:#334155;">
+            <div style="font-size:3rem;margin-bottom:12px;">📄</div>
+            <div style="font-size:1.1rem;color:#475569;font-weight:600;">Enter a ticker and click Generate</div>
+            <div style="font-size:0.82rem;margin-top:8px;color:#334155;line-height:1.7;">
+                Produces a full 9-section institutional research note including:<br>
+                Executive Summary · Financial Analysis · Valuation · Moat · Growth · Macro · Risks · Price Targets · Final Recommendation
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
