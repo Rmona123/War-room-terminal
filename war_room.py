@@ -657,57 +657,72 @@ def analyze_7_powers(info, fin, cf, ticker, sector, industry, stage, det=None):
     is_mega       = mktcap > 500e9
 
     # ── 1. SCALE ECONOMIES ───────────────────────────────────────────────────
-    # Evidence: large market cap (high volume), improving margins, capital-intensive moat
-    if is_mega and gm > 0.45:
+    # True scale = LOWER UNIT COSTS than competitors, not just being big
+    # Key signals: expanding margins with volume, high fixed cost base spread over large revenue
+    # Tighter: being large alone is NOT scale economies — you need margin proof
+    if is_mega and gm > 0.55 and om > 0.25:
         v = "YES"
-        r = f"Mega-cap with {gm*100:.0f}% gross margins — massive fixed-cost base spread over huge revenue gives structural cost advantage competitors can't match."
-    elif is_large and gm > 0.35 and om > 0.15:
+        r = f"Mega-cap ({fmtn(mktcap,pre='$')}) with {gm*100:.0f}% gross / {om*100:.0f}% operating margins — fixed costs (R&D, infrastructure) amortized over enormous revenue base creates a structural unit cost advantage competitors cannot match without equivalent scale."
+    elif is_semis and is_large and gm > 0.45:
         v = "YES"
-        r = f"Scale drives margin superiority: {gm*100:.0f}% gross / {om*100:.0f}% operating margin at ${mktcap/1e9:.0f}B scale makes per-unit economics hard for smaller rivals to replicate."
-    elif is_semis and is_large:
+        r = f"Semiconductor scale: fab economics require $20B+ capex — only a handful of players reach sufficient volume for cost parity. {gm*100:.0f}% gross margins confirm the cost advantage is real."
+    elif is_large and gm > 0.40 and om > 0.20 and rd_pct < 0.15:
         v = "YES"
-        r = "Semiconductor fabs cost $20B+ — scale is the defining competitive barrier; only a handful of players can operate at sufficient volume to be cost-competitive."
-    elif mktcap > 20e9 and gm > 0.25:
+        r = f"Scale advantage evident: {gm*100:.0f}% gross margins with {om*100:.0f}% operating margins at ${mktcap/1e9:.0f}B scale. Low R&D intensity ({rd_pct*100:.0f}%) means margins come from operational efficiency, not just IP — classic scale economics."
+    elif mktcap > 20e9 and gm > 0.30 and om > 0.12:
         v = "PARTIAL"
-        r = f"Some scale advantage visible in margins ({gm*100:.0f}% gross), but not yet at the level where scale becomes a prohibitive barrier to entry."
+        r = f"Some scale advantage ({gm*100:.0f}% gross, {om*100:.0f}% operating), but not yet at the threshold where scale becomes a prohibitive competitive barrier. A well-funded entrant could potentially replicate."
     else:
         v = "NO"
-        r = "Insufficient scale or margins to suggest a meaningful cost advantage over competitors based on volume alone."
+        r = f"Insufficient evidence of scale-driven cost advantage. Gross margin {gm*100:.0f}% and market cap ${mktcap/1e9:.0f}B do not suggest meaningful unit cost superiority over competitors."
     results["Scale Economies"] = {"verdict": v, "reasoning": r}
 
     # ── 2. NETWORK ECONOMIES ─────────────────────────────────────────────────
-    # Evidence: marketplace/platform, payments, social, communications
+    # TRUE network effect: each new user makes it MORE VALUABLE for ALL others
+    # Being large is NOT a network effect — the value must compound with user count
+    has_network_desc = any(x in desc for x in ["network effect","two-sided","marketplace",
+                                                 "platform","ecosystem","viral","flywheel"])
     if is_payments and is_large:
         v = "YES"
-        r = "Payment networks are classic two-sided markets — more merchants attract more cardholders and vice versa, creating a self-reinforcing loop that is nearly impossible to displace."
-    elif is_marketplace and is_large:
+        r = f"Payments network: textbook two-sided market where more merchants → more cardholders → more merchants. Visa/Mastercard-style flywheel is among the most durable network effects in existence — nearly impossible to displace."
+    elif is_marketplace and is_large and gm > 0.50:
         v = "YES"
-        r = "Platform/marketplace business: each additional buyer attracts more sellers and vice versa. Network density is the core competitive advantage."
-    elif is_software and is_large and any(x in desc for x in ["ecosystem","developer","api","integration"]):
+        r = f"Marketplace platform with {gm*100:.0f}% gross margins: each additional buyer attracts more sellers and vice versa. Network density IS the product — scale advantage and network effect reinforce each other."
+    elif is_software and is_large and has_network_desc and gm > 0.60:
         v = "YES"
-        r = "Large developer/integration ecosystem creates indirect network effects — more integrations make the platform more valuable, increasing switching costs for all participants."
-    elif is_marketplace or (is_software and any(x in desc for x in ["community","user","connect"])):
+        r = f"Large software platform with explicit network/ecosystem language and {gm*100:.0f}% margins — developer ecosystems and API integrations create indirect network effects where more integrations increase value for all participants."
+    elif (is_marketplace or has_network_desc) and mktcap > 5e9:
         v = "PARTIAL"
-        r = "Some network characteristics present, but network effects appear local or limited in scope rather than global and winner-take-most."
+        r = "Network characteristics present but effects appear local or limited in scope rather than global and winner-take-most. Worth monitoring whether network density is accelerating or plateauing."
+    elif is_software and any(x in desc for x in ["community","connect","share","collaborate"]):
+        v = "PARTIAL"
+        r = "Collaborative software may have weak network effects, but these are easily multi-homed (users join competing platforms simultaneously), limiting the defensive value."
     else:
         v = "NO"
-        r = "No clear evidence of network effects — additional users do not appear to meaningfully increase value for existing users."
+        r = "No evidence that additional users increase value for existing users. This appears to be a product or service business without network effect dynamics."
     results["Network Economies"] = {"verdict": v, "reasoning": r}
 
     # ── 3. COUNTER-POSITIONING ───────────────────────────────────────────────
-    # Evidence: disruptive model, high growth vs low-growth incumbents, new category
-    if rg > 0.25 and stage == "growth" and gm > 0.50:
+    # STRICT definition: challenger has SUPERIOR MODEL that incumbent CAN'T copy
+    # without destroying their own business. Fast growth alone is NOT enough.
+    # Key: the CANNIBALIZATION DILEMMA must exist for the incumbent
+    has_disrupt_desc = any(x in desc for x in ["disrupt","transform","replace","legacy",
+                                                 "traditional","obsolete","next generation"])
+    if rg > 0.30 and stage == "growth" and gm > 0.60 and has_disrupt_desc:
         v = "YES"
-        r = f"Fast-growing ({rg*100:.0f}% revenue growth) with high margins in a category where incumbents risk cannibalization by adopting this model — classic counter-positioning setup."
-    elif rg > 0.15 and any(x in desc for x in ["disrupt","transform","replace","legacy","traditional"]):
+        r = f"Classic counter-positioning setup: {rg*100:.0f}% revenue growth, {gm*100:.0f}% gross margins, and explicitly disrupting a legacy industry. Incumbents face a cannibalization dilemma — adopting this model destroys their existing revenue streams."
+    elif rg > 0.20 and stage == "growth" and gm > 0.50 and is_software:
+        v = "YES"
+        r = f"Cloud/SaaS model displacing on-premise incumbents: {rg*100:.0f}% growth with {gm*100:.0f}% margins. Legacy vendors can't match the economics without cannibalizing their installed base and services revenue."
+    elif rg > 0.15 and has_disrupt_desc and gm > 0.40:
         v = "PARTIAL"
-        r = f"Growth trajectory ({rg*100:.0f}%) and disruptive positioning suggest some counter-positioning, but incumbent response remains possible."
-    elif stage == "growth" and rg > 0.10:
+        r = f"Some counter-positioning signals: {rg*100:.0f}% growth with disruptive positioning. But until the incumbent response becomes clearly structurally constrained, this is an emerging rather than confirmed power."
+    elif stage == "growth" and rg > 0.10 and gm > 0.35:
         v = "PARTIAL"
-        r = "Growth-stage company in an evolving market — may be building counter-positioning advantage, but too early to confirm incumbents are structurally unable to respond."
+        r = f"Growth-stage company ({rg*100:.0f}% revenue growth) may be building counter-positioning, but the cannibalization dilemma for incumbents is not yet clearly established."
     else:
         v = "NO"
-        r = "No clear evidence of a business model that incumbents are structurally prevented from copying due to cannibalization risk."
+        r = "No evidence of a business model that incumbents are structurally prevented from copying. Either the model is easily replicable, or incumbents have already responded."
     results["Counter-Positioning"] = {"verdict": v, "reasoning": r}
 
     # ── 4. SWITCHING COSTS ───────────────────────────────────────────────────
@@ -808,7 +823,8 @@ def analyze_7_powers(info, fin, cf, ticker, sector, industry, stage, det=None):
     # Evidence: persistent outperformance, manufacturing excellence, operational culture
     # Nuance: the KEY signal is HIGHER MARGINS THAN DIRECT COMPETITORS with the SAME model
     # We proxy this by: unusually high margins for the sector + sustained over time (OM trend)
-    om_trend_list = det.get("om_trend", []) if hasattr(det, "get") else []
+    fcf_margin = fcf / rev if rev > 0 and not np.isnan(fcf) else 0
+    om_trend_list = det.get("om_trend", []) if det else []
     # Check if operating margins have been consistently high (stable/improving trend)
     om_stable = len(om_trend_list) >= 3 and all(x > 0.15 for x in om_trend_list[:3])
     om_improving = len(om_trend_list) >= 2 and om_trend_list[0] > om_trend_list[-1]
@@ -1040,8 +1056,9 @@ with tab_research:
         st.error(f"No data found for **{ticker}**")
         st.stop()
 
-    # ETF detection
-    is_etf = sg(info,"quoteType","") in ["ETF","MUTUALFUND"] or sg(info,"fundFamily",None) is not None
+    # ETF detection — only trust quoteType, fundFamily is unreliable
+    quote_type = (sg(info,"quoteType","") or "").upper()
+    is_etf = quote_type in ["ETF","MUTUALFUND"]
 
     if is_etf:
         name    = sg(info,"longName",ticker)
